@@ -56,6 +56,12 @@ class Operation(BaseOperation):
     SEL_CAPTCHA_IMAGE = 'img[data-qa="account-captcha-picture"]'
     SEL_CAPTCHA_INPUT = 'input[data-qa="account-captcha-input"]'
 
+    # React вешает __reactProps* на DOM-узлы при гидратации
+    JS_IS_HYDRATED = """sel => {
+        const el = document.querySelector(sel);
+        return !!el && Object.keys(el).some(k => k.startsWith("__reactProps"));
+    }"""
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._tool: HHApplicantTool | None = None
@@ -180,10 +186,12 @@ class Operation(BaseOperation):
                     api_client.oauth_client.authorize_url  # + "&role=applicant"
                 )
                 logger.debug(f"Переход на страницу OAuth: {authorize_url}")
+                # Не ждём "load": он зависит от сторонних трекеров, и один
+                # недоступный пиксель вешает переход. Форму ждёт _fill_username
                 await page.goto(
                     authorize_url,
                     timeout=60000,
-                    wait_until="load",
+                    wait_until="domcontentloaded",
                 )
 
                 if self.is_automated:
@@ -242,16 +250,19 @@ class Operation(BaseOperation):
         return digits
 
     async def _fill_username(self, page, username: str) -> None:
-        await page.wait_for_selector(
-            ", ".join(
-                (
-                    self.SEL_LOGIN_FORM,
-                    self.SEL_LOGIN_INPUT,
-                    self.SEL_PHONE_INPUT,
-                    self.SEL_EMAIL_INPUT,
-                )
-            ),
-            timeout=self.selector_timeout,
+        login_form = ", ".join(
+            (
+                self.SEL_LOGIN_FORM,
+                self.SEL_LOGIN_INPUT,
+                self.SEL_PHONE_INPUT,
+                self.SEL_EMAIL_INPUT,
+            )
+        )
+        await page.wait_for_selector(login_form, timeout=self.selector_timeout)
+        # Форма из SSR видна раньше, чем её гидратирует React, и введённое до
+        # этого значение сбрасывается: hh.ru отвечает «Обязательное поле»
+        await page.wait_for_function(
+            self.JS_IS_HYDRATED, arg=login_form, timeout=self.selector_timeout
         )
 
         if "@" in username:

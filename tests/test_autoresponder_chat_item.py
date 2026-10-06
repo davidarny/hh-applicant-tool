@@ -191,6 +191,90 @@ class TestLastMessage:
 
         assert _parse(op, item) is None
 
+    def test_creation_time_field_is_used(self):
+        """Список чатов отдаёт время сообщения в creationTime."""
+        op = Operation()
+        message = _message()
+        message["creationTime"] = message.pop("createdAt")
+        item = {
+            "id": 1,
+            "lastMessage": message,
+            "resources": {"vacancies": {"555": _vacancy()}, "resumes": {"777": _resume()}},
+        }
+
+        assert _parse(op, item) is not None
+
+    def test_own_last_message_skipped(self):
+        """Последним написал соискатель — ждём работодателя, не отвечаем."""
+        op = Operation()
+        message = _message("Здравствуйте! Меня зовут Пётр")
+        message["participantId"] = 4242
+        item = {
+            "id": 1,
+            "currentParticipantId": 4242,
+            "lastMessage": message,
+            "resources": {"vacancies": {"555": _vacancy()}, "resumes": {"777": _resume()}},
+        }
+
+        assert _parse(op, item) is None
+
+    def test_blocked_chat_skipped(self):
+        """В заблокированный чат hh не даст написать, пропускаем его."""
+        op = Operation()
+        item = {
+            "id": 1,
+            "blockInfo": {"reason": "EMPLOYER_ADDITIONAL_CHECK"},
+            "lastMessage": _message(),
+            "resources": {"vacancies": {"555": _vacancy()}, "resumes": {"777": _resume()}},
+        }
+
+        assert _parse(op, item) is None
+
+
+class TestFormatSalary:
+    def test_resume_amount(self):
+        """Резюме отдаёт ожидания одной суммой в amount."""
+        op = Operation()
+
+        assert op.format_salary({"amount": 320000, "currency": "RUR"}) == "320000 RUR"
+
+    def test_range(self):
+        op = Operation()
+
+        assert op.format_salary({"from": 200000, "to": 300000, "currency": "RUR"}) == "200000-300000 RUR"
+
+
+class TestReplyToChat:
+    def test_write_disabled_skips_ai_and_send(self):
+        """Пока ИИ-помощник работодателя печатает, hh ответит 409.
+
+        Не тратим запрос к AI и не отправляем сообщение.
+        """
+        op = Operation()
+        op.tool = MagicMock()
+        op.get_chat_data = MagicMock(  # type: ignore[method-assign]
+            return_value={
+                "chat": {
+                    "writePossibility": {
+                        "name": "DISABLED_FOR_APPLICANT_BY_AI_ASSISTANT",
+                        "writeDisabledReasons": ["AI_ASSISTANT_TYPING"],
+                    },
+                    "messages": {"items": [_message()]},
+                }
+            }
+        )
+        op.send_chat_message = MagicMock()  # type: ignore[method-assign]
+        item = {
+            "id": 1,
+            "lastMessage": _message(),
+            "resources": {"vacancies": {"555": _vacancy()}, "resumes": {"777": _resume()}},
+        }
+
+        op.reply_to_chat(_parse(op, item))
+
+        op.tool.get_chat_ai.assert_not_called()
+        op.send_chat_message.assert_not_called()
+
 
 class TestGetChatsAwaitingReply:
     def test_skipped_chats_do_not_break_the_loop(self):
@@ -236,3 +320,46 @@ class TestGetChatsAwaitingReply:
         chats = op.get_chats_awaiting_reply(1)
 
         assert [c.chat_id for c in chats] == [2]
+
+    def test_repeated_page_does_not_duplicate_chats(self):
+        """hh игнорирует page и отдаёт одну и ту же страницу.
+
+        Чат должен попасть в ответ один раз, иначе бот напишет в него
+        столько раз, сколько страниц разрешено листать.
+        """
+        op = Operation()
+        tool = MagicMock()
+        tool.get_resumes.return_value = [
+            {
+                "id": "777",
+                "hash": "abc123",
+                "title": "Python разработчик",
+                "status": {"id": "published"},
+                "experience": None,
+                "salary": None,
+                "skills": None,
+            }
+        ]
+        op.tool = tool
+
+        op.get_chats = MagicMock(  # type: ignore[method-assign]
+            return_value={
+                "chats": {
+                    "items": [
+                        {
+                            "id": 2,
+                            "lastMessage": _message(),
+                            "resources": {
+                                "vacancies": {"555": _vacancy()},
+                                "resumes": {"777": _resume()},
+                            },
+                        },
+                    ],
+                }
+            }
+        )
+
+        chats = op.get_chats_awaiting_reply(5)
+
+        assert [c.chat_id for c in chats] == [2]
+        assert op.get_chats.call_count == 2

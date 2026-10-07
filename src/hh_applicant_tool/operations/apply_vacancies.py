@@ -1371,12 +1371,14 @@ class Operation(BaseOperation):
 
         me: datatypes.User = self.tool.get_me()
         seen_employers = set()
+        seen_vacancies = self._load_applied_vacancy_keys()
 
         for resume in resumes:
             limit_reached = self._apply_resume(
                 resume=resume,
                 user=me,
                 seen_employers=seen_employers,
+                seen_vacancies=seen_vacancies,
             )
             if limit_reached:
                 logger.warning(
@@ -1394,11 +1396,49 @@ class Operation(BaseOperation):
 
         print("📝 Отклики на вакансии разосланы!")
 
+    @staticmethod
+    def _vacancy_clone_key(vacancy: dict) -> tuple[str, str] | None:
+        """Работодатель и название, по ним узнаём копии одной вакансии.
+
+        Некоторые работодатели публикуют одну вакансию десятком копий с
+        разными id. Отклик на каждую копию выглядит как спам, и такие
+        отклики отклоняют все разом.
+        """
+        employer = vacancy.get("employer") or {}
+        employer_key = employer.get("id") or employer.get("name")
+        name = " ".join((vacancy.get("name") or "").lower().split())
+        if not employer_key or not name:
+            return None
+        return (str(employer_key), name)
+
+    def _load_applied_vacancy_keys(self) -> set[tuple[str, str]]:
+        """Ключи вакансий из последних откликов.
+
+        Копии публикуют одновременно, поэтому хватает двух последних
+        страниц откликов, полная история не нужна.
+        """
+        keys: set[tuple[str, str]] = set()
+        try:
+            for page in range(2):
+                data = self.api_client.get(
+                    "/negotiations", {"page": page, "per_page": 100}
+                )
+                for item in data.get("items", []):
+                    key = self._vacancy_clone_key(item.get("vacancy") or {})
+                    if key:
+                        keys.add(key)
+                if page + 1 >= data.get("pages", 0):
+                    break
+        except ApiError as ex:
+            logger.warning("Не удалось загрузить отклики для поиска копий: %s", ex)
+        return keys
+
     def _apply_resume(
         self,
         resume: datatypes.Resume,
         user: datatypes.User,
         seen_employers: set[str],
+        seen_vacancies: set[tuple[str, str]] | None = None,
     ) -> bool:
         logger.info(
             "Начинаю рассылку откликов для резюме: %s (%s)",
@@ -1422,6 +1462,8 @@ class Operation(BaseOperation):
         do_apply = True
         storage = self.tool.storage
         site_emails = {}
+        if seen_vacancies is None:
+            seen_vacancies = set()
 
         if self.ai_filter:
             if self.ai_filter in ("heavy", "custom"):
@@ -1516,8 +1558,11 @@ class Operation(BaseOperation):
 
                 vacancy_id = vacancy["id"]
                 relations = vacancy.get("relations", [])
+                clone_key = self._vacancy_clone_key(vacancy)
 
                 if relations:
+                    if clone_key:
+                        seen_vacancies.add(clone_key)
                     logger.debug(
                         "Пропускаем вакансию с откликом: %s",
                         vacancy["alternate_url"],
@@ -1528,6 +1573,17 @@ class Operation(BaseOperation):
                             vacancy["alternate_url"],
                         )
                         print("⛔ Пришел отказ от", vacancy["alternate_url"])
+                    continue
+
+                if clone_key and clone_key in seen_vacancies:
+                    logger.info(
+                        "Пропускаем копию вакансии, на которую уже был отклик: %s",
+                        vacancy["alternate_url"],
+                    )
+                    print(
+                        "⏩ Копия вакансии, на которую уже был отклик",
+                        vacancy["alternate_url"],
+                    )
                     continue
 
                 if vacancy.get("archived"):
@@ -1712,6 +1768,9 @@ class Operation(BaseOperation):
                         )
 
                     logger.debug(letter)
+
+                if clone_key:
+                    seen_vacancies.add(clone_key)
 
                 logger.debug(
                     "Пробуем откликнуться на вакансию: %s",

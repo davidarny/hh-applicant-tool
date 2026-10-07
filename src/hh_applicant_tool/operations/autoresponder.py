@@ -56,7 +56,7 @@ class Namespace(BaseNamespace):
 
 
 class Operation(BaseOperation):
-    """Автоматические ответы на сообщения работодателей"""
+    """Автоответчик для чата с решением тестов"""
 
     __aliases__: list[str] = ["chat-autoreply"]
 

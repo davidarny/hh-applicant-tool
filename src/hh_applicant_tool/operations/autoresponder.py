@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import requests
 
-from hh_applicant_tool.api.errors import ApiError
+from hh_applicant_tool.api.errors import ApiError, BadResponse
 
 from ..tool import BaseNamespace, BaseOperation
 
@@ -125,8 +125,9 @@ class Operation(BaseOperation):
                         )
 
             # Обрыв соединения или HTML вместо JSON от hh.ru: разовый сбой,
-            # трейсбек тут не нужен, следующая проверка через interval
-            except (ApiError, requests.RequestException) as ex:
+            # трейсбек тут не нужен, следующая проверка через interval.
+            # BadResponse покрывает и ApiError, и 502 с HTML от api.hh.ru
+            except (BadResponse, requests.RequestException) as ex:
                 logger.error("Ошибка получения чатов: %s", ex)
             except Exception:
                 logger.exception("Ошибка автоответчика")

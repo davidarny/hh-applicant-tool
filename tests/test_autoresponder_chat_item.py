@@ -18,8 +18,10 @@ from datetime import datetime, timedelta, timezone
 from threading import Event
 from unittest.mock import MagicMock
 
+import pytest
 import requests
 
+from hh_applicant_tool.api.errors import BadResponse
 from hh_applicant_tool.operations.autoresponder import Operation
 
 
@@ -371,14 +373,22 @@ class TestGetChatsAwaitingReply:
 
 
 class TestRun:
-    def test_network_error_logged_without_traceback(self, caplog):
+    @pytest.mark.parametrize(
+        "error",
+        [
+            requests.ConnectionError("Remote end closed connection"),
+            # api.hh.ru отдаёт 502 с HTML, клиент не может разобрать JSON
+            BadResponse("Can't decode JSON: GET https://api.hh.ru/resumes/mine (502)"),
+        ],
+    )
+    def test_network_error_logged_without_traceback(self, caplog, error):
         """hh.ru рвёт соединение — в логе одна строка, цикл живёт дальше."""
         cancel = Event()
         op = Operation()
 
         def fail(_max_pages):
             cancel.set()
-            raise requests.ConnectionError("Remote end closed connection")
+            raise error
 
         op.get_chats_awaiting_reply = fail  # type: ignore[method-assign]
         args = Namespace(max_pages=1, interval=0, delete=False, _cancel_event=cancel)
@@ -387,7 +397,5 @@ class TestRun:
             op.run(MagicMock(), args)
 
         errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert [r.getMessage() for r in errors] == [
-            "Ошибка получения чатов: Remote end closed connection"
-        ]
+        assert [r.getMessage() for r in errors] == [f"Ошибка получения чатов: {error}"]
         assert errors[0].exc_info is None

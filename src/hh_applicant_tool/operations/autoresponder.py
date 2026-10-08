@@ -124,7 +124,9 @@ class Operation(BaseOperation):
                             ex,
                         )
 
-            except ApiError as ex:
+            # Обрыв соединения или HTML вместо JSON от hh.ru: разовый сбой,
+            # трейсбек тут не нужен, следующая проверка через interval
+            except (ApiError, requests.RequestException) as ex:
                 logger.error("Ошибка получения чатов: %s", ex)
             except Exception:
                 logger.exception("Ошибка автоответчика")

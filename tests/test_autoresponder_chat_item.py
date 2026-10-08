@@ -12,8 +12,13 @@ vacancy/resume — NameError на первом же чате. Тесты лов�
 
 from __future__ import annotations
 
+import logging
+from argparse import Namespace
 from datetime import datetime, timedelta, timezone
+from threading import Event
 from unittest.mock import MagicMock
+
+import requests
 
 from hh_applicant_tool.operations.autoresponder import Operation
 
@@ -363,3 +368,26 @@ class TestGetChatsAwaitingReply:
 
         assert [c.chat_id for c in chats] == [2]
         assert op.get_chats.call_count == 2
+
+
+class TestRun:
+    def test_network_error_logged_without_traceback(self, caplog):
+        """hh.ru рвёт соединение — в логе одна строка, цикл живёт дальше."""
+        cancel = Event()
+        op = Operation()
+
+        def fail(_max_pages):
+            cancel.set()
+            raise requests.ConnectionError("Remote end closed connection")
+
+        op.get_chats_awaiting_reply = fail  # type: ignore[method-assign]
+        args = Namespace(max_pages=1, interval=0, delete=False, _cancel_event=cancel)
+
+        with caplog.at_level(logging.ERROR):
+            op.run(MagicMock(), args)
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert [r.getMessage() for r in errors] == [
+            "Ошибка получения чатов: Remote end closed connection"
+        ]
+        assert errors[0].exc_info is None

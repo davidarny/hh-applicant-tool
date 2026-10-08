@@ -142,7 +142,6 @@ def test_filter_client_sends_system_prompt_in_openai_payload() -> None:
         base_url="https://example.test/v1/chat/completions",
         model="test-model",
         system_prompt="Only accept Python roles",
-        rate_limit=0,
         session=session,
     )
 

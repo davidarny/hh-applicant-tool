@@ -372,6 +372,19 @@ class TestGetChatsAwaitingReply:
         assert op.get_chats.call_count == 2
 
 
+class TestChatUrl:
+    def test_chatik_host_from_initial_state(self):
+        """В v2.0 chat_url распаковывал словарь как пару и падал на старте."""
+        op = Operation()
+        op.tool = MagicMock()
+        op.tool.get_initial_state.return_value = {
+            "config": {"externalMicroFrontendHosts": {"chatik": "https://chatik.hh.ru"}},
+            "account": {},
+        }
+
+        assert op.chat_url == "https://chatik.hh.ru"
+
+
 class TestRun:
     @pytest.mark.parametrize(
         "error",

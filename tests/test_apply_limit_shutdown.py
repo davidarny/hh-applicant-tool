@@ -1,7 +1,7 @@
-"""Deterministic tests for two apply fixes:
+"""Deterministic tests for --max-responses being enforced in the apply loop.
 
-1. --max-responses is actually enforced in the apply loop.
-2. Ctrl+C (SIGINT) triggers graceful shutdown, not a raw traceback.
+The graceful-shutdown test went away with the cancel check, which upstream
+removed from the loop in v2.0.
 
 These tests avoid live hh.ru credentials — they mock the network/API layer,
 so they run in any environment (the real /me and /resumes/mine calls return
@@ -10,7 +10,6 @@ so they run in any environment (the real /me and /resumes/mine calls return
 
 from __future__ import annotations
 
-import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -96,29 +95,3 @@ class TestMaxResponses:
         op._apply_resume(resume=resume, user=user, seen_employers=set())
 
         assert op.tool.api_client.post.call_count == total
-
-
-class TestGracefulShutdown:
-    def test_cancel_event_stops_loop_between_vacancies(self):
-        """Setting _cancel_event gracefully halts the loop (UI + new CLI path)."""
-        op = _make_operation(max_responses=0)
-        cancel_event = threading.Event()
-        op._cancel_event = cancel_event
-
-        applied = []
-
-        def fake_get(resume_id=None, resume_title=""):
-            for i in range(20):
-                applied.append(i)
-                if i == 2:
-                    cancel_event.set()
-                yield _make_vacancy(i)
-
-        op._get_vacancies = fake_get
-        resume = {"id": "r1", "title": "Dev", "alternate_url": "u"}
-        user = {"first_name": "A", "last_name": "B", "email": "a@b.c", "phone": ""}
-        op._apply_resume(resume=resume, user=user, seen_employers=set())
-
-        # The cancel event yields the first 3, then the loop must break
-        assert len(applied) == 3
-        assert op.tool.api_client.post.call_count <= 3

@@ -22,18 +22,14 @@ WORKDIR /app
 
 COPY pyproject.toml poetry.lock* .
 
-# 1. Cтавим playwright, браузер и системные зависимости (этот тяжелый слой теперь закэшируется)
-RUN touch README.md && \
-    pip install --no-cache-dir playwright && \
-    playwright install-deps chromium && \
-    su docker -c "playwright install chromium"
-
-# 2. Теперь копируем исходный код
+# 1. Копируем исходный код. С 2.0 авторизация идёт без браузера,
+#    поэтому playwright и chromium больше не ставим
+RUN touch README.md
 COPY src ./src
 
-# 3. Устанавливаем саму утилиту и остальные зависимости
+# 2. Устанавливаем саму утилиту с зависимостями
 #    Подготовка cron
-RUN pip install --no-cache-dir -e '.[playwright,pillow]' && \
+RUN pip install --no-cache-dir -e . && \
     touch /var/log/cron.log && chown docker:docker /var/log/cron.log && \
     mkdir -p ./config && chown -R docker:docker ./config
 

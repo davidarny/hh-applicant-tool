@@ -14,8 +14,10 @@ SHELL=/bin/bash
 # Рассылаем отклики. Поиск, AI-фильтр и письма настроены в config/apply.sh
 0 8-21 * * * /bin/bash -c 'sleep $((60 + RANDOM \% 241))' && /bin/bash /app/config/apply.sh >> /var/log/cron.log 2>&1
 
-# AI-автоответчик в чатах с работодателями, работает постоянно
-@reboot /usr/local/bin/python -m hh_applicant_tool -v autoresponder >> /var/log/cron.log 2>&1
+# AI-автоответчик в чатах с работодателями, работает постоянно.
+# --use-ai нужен, чтобы капчу решала модель: без него hh-applicant-tool
+# открывает окно tkinter, которого в контейнере нет
+@reboot /usr/local/bin/python -m hh_applicant_tool -v --use-ai autoresponder >> /var/log/cron.log 2>&1
 
 # Тест: каждые 5 минут (задержка до 1 минуты, чтобы не накладывались)
 #*/5 * * * * /bin/bash -c 'sleep $((1 + RANDOM \% 59))' && /usr/local/bin/python -m hh_applicant_tool apply-vacancies >> /var/log/cron.log 2>&1

@@ -38,11 +38,14 @@ COPY --chmod=755 crontab startup.sh .
 
 # Запускаем cron и читаем лог
 # cron не видит переменные окружения, переданные главному процессу, точнее
-# он начинает новую сессию, где тот же $CONFIG_DIR пуст
+# он начинает новую сессию, где тот же $CONFIG_DIR пуст.
+# cron пропускает @reboot, если остался маркер crond.reboot. При рестарте
+# контейнера он сохраняется, и без удаления автоответчик не запустится
 CMD printenv | grep -E 'CONFIG_DIR|HH_PROFILE_ID' >> /etc/environment && \
     chown -R docker:docker ./config && \
     dos2unix -n ./crontab /tmp/crontab && \
     crontab -u docker /tmp/crontab && \
+    rm -f /var/run/crond.reboot && \
     cron && \
     tail -f /var/log/cron.log
 

@@ -1,4 +1,4 @@
-# TODO: дописать. Этот код сгенерирован Chat GPT. Я половину его бреда
+# К удалению
 # переписал, осталось "чуть-чуть"
 # За основу взять этот код
 # https://github.com/s3rgeym/hh-ai-responder/blob/main/main.go
@@ -17,13 +17,14 @@ import requests
 
 from hh_applicant_tool.api.errors import ApiError, BadResponse
 
+from ..errors import OperationCanceled
 from ..tool import BaseNamespace, BaseOperation
 
 if TYPE_CHECKING:
     from ..tool import HHApplicantTool
 
 
-logger = logging.getLogger(__package__)
+logger = logging.getLogger("hh-applicant-tool")
 
 
 @dataclass
@@ -124,6 +125,9 @@ class Operation(BaseOperation):
                             ex,
                         )
 
+            except KeyboardInterrupt as ex:
+                logger.info("Автоответчик остановлен")
+                raise OperationCanceled() from ex
             # Обрыв соединения или HTML вместо JSON от hh.ru: разовый сбой,
             # трейсбек тут не нужен, следующая проверка через interval.
             # BadResponse покрывает и ApiError, и 502 с HTML от api.hh.ru
@@ -132,15 +136,24 @@ class Operation(BaseOperation):
             except Exception:
                 logger.exception("Ошибка автоответчика")
 
+            # В 2.0.8 апстрим убрал паузу, и цикл без неё долбит hh без
+            # перерыва
             cancel_event.wait(args.interval)
 
         logger.info("Автоответчик остановлен")
 
     @cached_property
+    def ai_client(self):
+        # В 2.0.8 апстрим создаёт клиента без конфига, без ключа он не
+        # работает. Берём ключ и модель из секции openai.chat
+        return self.tool.get_ai_client(
+            **self.tool.get_openai_config("openai.chat")
+        )
+
+    @cached_property
     def chat_url(self) -> str:
-        # get_initial_state отдаёт один словарь, не пару
-        rc = self.tool.get_initial_state("https://hh.ru/applicant/my_resumes")
-        return rc["config"]["externalMicroFrontendHosts"]["chatik"]
+        r = self.tool.get_initial_state("https://hh.ru/applicant/my_resumes")
+        return r["config"]["externalMicroFrontendHosts"]["chatik"]
 
     def get_chats(
         self,
@@ -572,15 +585,14 @@ class Operation(BaseOperation):
             messages,
         )
 
-        temperature = 0.1 if chat.reply_options else 0.5
-
-        ai_client = self.tool.get_chat_ai(system_prompt)
-        ai_client.temperature = temperature
-        # Длину ответа задаёт промпт. 512 токенов моделям с рассуждениями не
-        # хватало: ответ обрывался посреди фразы и всё равно уходил в чат
-        ai_client.max_completion_tokens = 2000
-
-        reply = ai_client.complete(user_prompt).strip()
+        reply = self.ai_client.complete(
+            message=user_prompt,
+            system_prompt=system_prompt,
+            temperature=0.1 if chat.reply_options else 0.5,
+            # Длину ответа задаёт промпт. 512 токенов моделям с рассуждениями
+            # не хватало: ответ обрывался посреди фразы и всё равно уходил в чат
+            max_completion_tokens=2000,
+        ).strip()
 
         if not reply:
             logger.warning(

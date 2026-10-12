@@ -11,13 +11,14 @@ from threading import Lock
 import requests
 from urllib3.util import Timeout
 
-from ..constants import (
-    DEFAULT_OPENAI_CONNECT_TIMEOUT,
-    DEFAULT_OPENAI_TIMEOUT,
-)
 from .base import AIError
 
-logger = logging.getLogger(__package__)
+DEFAULT_DELAY = 0.5
+DEFAULT_TIMEOUT = 60.0
+DEFAULT_CONNECT_TIMEOUT = 10.0
+
+
+logger = logging.getLogger("hh-applicant-tool")
 
 
 class OpenAIError(AIError):
@@ -33,9 +34,9 @@ class ChatOpenAI:
     base_url: str
     system_prompt: str | None = None
     # Общий таймаут на весь запрос
-    timeout: float = DEFAULT_OPENAI_TIMEOUT
+    timeout: float | None = None
     # Отдельный таймаут только на установку соединения
-    connect_timeout: float = DEFAULT_OPENAI_CONNECT_TIMEOUT
+    connect_timeout: float | None = None
 
     # Параметры для retry логики
     max_retries: int = 3
@@ -46,7 +47,7 @@ class ChatOpenAI:
 
     # Минимальный интервал между запросами (сек). Если с прошлого запроса
     # прошло больше — не ждём.
-    delay: float = 0.5
+    delay: float | None = None
 
     session: requests.Session = field(default_factory=requests.Session)
 
@@ -56,6 +57,9 @@ class ChatOpenAI:
 
     def __post_init__(self) -> None:
         self._lock = Lock()
+        self.delay = self.delay or DEFAULT_DELAY
+        self.timeout = self.timeout or DEFAULT_TIMEOUT
+        self.connect_timeout = self.connect_timeout or DEFAULT_CONNECT_TIMEOUT
 
     def _default_headers(self) -> dict[str, str]:
         return {
@@ -107,14 +111,60 @@ class ChatOpenAI:
 
         return float(attempt + 1)
 
-    def _post_chat(self, messages: list[dict]) -> str:
-        """Отправка messages в /chat/completions с retry-логикой."""
+    def _build_messages(
+        self,
+        user_content: str | list[dict],
+        system_prompt: str | None = None,
+        history: list[dict] | None = None,
+    ) -> list[dict]:
+        """Сборка списка messages: system -> history -> текущее сообщение.
+
+        Если system_prompt не передан (None), берётся self.system_prompt.
+        Пустой системный промпт не добавляется.
+        """
+        messages: list[dict] = []
+
+        if system_prompt is None:
+            system_prompt = self.system_prompt
+
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        if history:
+            messages.extend(history)
+
+        # Пользовательское сообщение всегда обязательно
+        messages.append({"role": "user", "content": user_content})
+        return messages
+
+    def _post_chat(
+        self,
+        messages: list[dict],
+        *,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_completion_tokens: int | None = None,
+        **extra,
+    ) -> str:
+        """Отправка messages в /chat/completions с retry-логикой.
+
+        Параметры, не переданные явно (None), берутся из полей класса.
+        Любые дополнительные параметры (top_p, seed, response_format...)
+        добавляются в payload как есть.
+        """
         payload = {
-            "model": self.model,
+            "model": model if model is not None else self.model,
             "messages": messages,
-            "temperature": self.temperature,
-            "max_completion_tokens": self.max_completion_tokens,
+            "temperature": (
+                temperature if temperature is not None else self.temperature
+            ),
+            "max_completion_tokens": (
+                max_completion_tokens
+                if max_completion_tokens is not None
+                else self.max_completion_tokens
+            ),
             "stream": False,
+            **extra,
         }
 
         for attempt in range(self.max_retries + 1):
@@ -162,20 +212,41 @@ class ChatOpenAI:
 
         raise OpenAIError("OpenAI request failed after retries")
 
-    def complete(self, message: str) -> str:
-        """Генерация текста через OpenAI API"""
-        messages = []
+    def complete(
+        self,
+        message: str,
+        *,
+        history: list[dict] | None = None,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_completion_tokens: int | None = None,
+        **extra,
+    ) -> str:
+        """Генерация текста через OpenAI API.
 
-        # Добавляем системный промпт только если он не пустой и не None
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
-        # Пользовательское сообщение всегда обязательно
-        messages.append({"role": "user", "content": message})
+        history — предыдущие сообщения диалога в формате
+        [{"role": "user" | "assistant", "content": "..."}, ...].
+        """
+        messages = self._build_messages(message, system_prompt, history)
 
-        logger.debug("AI системный промпт: %s", self.system_prompt)
-        logger.debug("AI запрос: %s", message)
+        logger.debug(
+            "AI системный промпт: %s",
+            system_prompt if system_prompt is not None else self.system_prompt,
+        )
+        logger.debug(
+            "AI запрос: %s (сообщений в истории: %d)",
+            message,
+            len(history or []),
+        )
 
-        return self._post_chat(messages)
+        return self._post_chat(
+            messages,
+            model=model,
+            temperature=temperature,
+            max_completion_tokens=max_completion_tokens,
+            **extra,
+        )
 
     def recognize_text(
         self,
@@ -186,6 +257,12 @@ class ChatOpenAI:
             "Распознай текст на изображении. "
             "Верни только распознанный текст без пояснений."
         ),
+        history: list[dict] | None = None,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_completion_tokens: int | None = None,
+        **extra,
     ) -> str:
         """Распознавание текста на изображении через vision-модель."""
         if not data:
@@ -193,25 +270,26 @@ class ChatOpenAI:
 
         b64 = base64.b64encode(data).decode("ascii")
 
-        messages: list[dict] = []
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
-
-        messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{mime_type};base64,{b64}",
-                        },
+        messages = self._build_messages(
+            [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{b64}",
                     },
-                ],
-            }
+                },
+            ],
+            system_prompt,
+            history,
         )
 
         logger.debug("AI vision запрос: %s, %d байт", mime_type, len(data))
 
-        return self._post_chat(messages)
+        return self._post_chat(
+            messages,
+            model=model,
+            temperature=temperature,
+            max_completion_tokens=max_completion_tokens,
+            **extra,
+        )

@@ -4,11 +4,12 @@ import argparse
 import base64
 import json
 import logging
+import random
 import re
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING
-from urllib.parse import parse_qs, quote, urljoin, urlsplit
+from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -19,7 +20,9 @@ if TYPE_CHECKING:
     from ..tool import HHApplicantTool
 
 
-logger = logging.getLogger(__name__)
+MAX_RETRIES = 10
+
+logger = logging.getLogger("hh-applicant-tool")
 
 
 class Operation(BaseOperation):
@@ -31,18 +34,6 @@ class Operation(BaseOperation):
         parser.add_argument("username", nargs="?", help="Email или телефон")
 
     def run(self, tool: HHApplicantTool, args) -> int | None:
-        self._tool = tool
-        self._args = args
-        try:
-            self._run()
-        except KeyboardInterrupt:
-            logger.warning("Операция прервана пользователем")
-            return 1
-        return 0
-
-    def _run(self) -> None:
-        tool = self._tool
-        args = self._args
         api_client = tool.api_client
         storage = tool.storage
         session = tool.session
@@ -60,88 +51,113 @@ class Operation(BaseOperation):
         if not is_email:
             username = self._normalize_phone_number(username)
 
-        authorize_url = api_client.oauth_client.authorize_url
-        logger.debug(authorize_url)
-
-        backurl = authorize_url + "&skip_choose_account=true"
-        fail_url = (
-            "/account/login?backurl="
-            + quote(backurl, safe="")
-            + "&oauth=true&response_type=code"
+        # https://api.hh.ru/openapi/redoc#section/Avtorizaciya/Zapros-avtorizacii-pod-drugim-polzovatelem
+        # Если аккаунт еще и как работодатель может войти, то по умолчанию перекидывает на авторизацию
+        # в качестве employer
+        authorize_url = api_client.oauth_client.authorize_url(
+            force_login="true",
+            role="applicant",
+            force_role="true",
+            skip_choose_account="true",
         )
-
-        # 1. Страница авторизации -> xsrf и публичный ключ
+        logger.info(
+            f"Эту ссылку можно открыть в браузере для изучения процесса авторизации: {authorize_url=}"
+        )
+        # Переход на страницу нужен для установки cookie xsrf_token
         r = session.get(authorize_url)
-        # Если куки не протушли, то авторизация не пройдет
-
         redirect_url = r.url
+        logger.debug(redirect_url)
+
         data = tool.parse_initial_state(r)
-        xsrf = data["xsrfToken"]
+
+        try:
+            xsrf = data["xsrfToken"]
+        except KeyError as ex:
+            raise OperationError("xsrfToken отсутствует на странице!") from ex
+
+        # На всякий случай проверим, что значение из cookie совпадает с тем, что на странице
+        assert xsrf == tool.xsrf_token
 
         try:
             pubkey = data["loginTrustFlagsSecret"]
         except KeyError as ex:
             raise OperationError(
-                "Что-то пошло не так, возможно, вы уже авторизованы."
+                "Публичный ключ для шифрования параметров loginTrustFlags отсутствует!"
             ) from ex
 
         # Эти заголовки у всех POST-запросов при авторизации
-        # У них referer отличается только, но наврядли его гикто не проверяет
-        ajax_headers = {
-            "x-hhtmfrom": "",
-            "x-hhtmsource": "account_login",
-            "x-requested-with": "XMLHttpRequest",
-            "x-xsrftoken": xsrf,
+        # У них referer не отличается, но наврядли его кто проверяет
+        login_headers = {
+            "Accept": "application/json",
+            "X-Hhtmfrom": "",
+            "X-Hhtmsource": "account_login",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-Xsrftoken": xsrf,
+            "Referer": redirect_url,
         }
 
-        # 2. Запрос кода
+        # Мне лень делать авторизацию по паролю, так как там и параметры шлются на
+        # другой эндпоинт, так и обработка капчи отличается
+        # Запрос кода
         params = {
-            "_xsrf": xsrf,
-            "failUrl": fail_url,
-            "remember": "yes",
-            "username": username,
-            "password": "",
-            "isBot": "false",
             "login": username,
             "otpType": ["phone", "email"][is_email],
             "operationType": "applicant_otp_auth",
             "authScenario": "APPLICANT_AUTH",
+            "formatPhone": "true",
+            "isSignupPage": "false",
             "loginTrustFlags": self._login_trust_flags(pubkey),
+            "captchaText": "",
         }
+
         otp_url = urljoin(redirect_url, "/account/otp_generate")
 
+        tries = 0
         while True:
-            logger.debug("Пробуем авторизоваться: POST %s %r", otp_url, params)
-            r = session.post(otp_url, params, ajax_headers)
+            time.sleep(random.uniform(3.0, 5.0))
+            logger.debug(
+                "otp generate params: %r | headers: %r", params, login_headers
+            )
+            r = session.post(
+                otp_url,
+                # Просто как образец отправки force multipart
+                files={k: (None, v) for k, v in params.items()},
+                headers=login_headers,
+            )
+            logger.debug(f"{r.request.method} {r.url} {r.status_code}")
+
             res = r.json()
 
             if res.get("success"):
                 logger.info("Код авторизации был выслан!")
                 break
 
+            # logger.debug(res)
             captcha = res.get("hhcaptcha") or {}
 
             if "captchaState" not in captcha:
-                raise OperationError("Ошибка авторизации!")
+                raise OperationError("Неправильный запрос!")
 
             # isBot еще интересное значение
             if captcha.get("captchaError"):
                 logger.warning("Капча была введена неверно!")
 
+            tries += 1
+            if tries >= MAX_RETRIES:
+                raise OperationError("Исчерпано количество неверных попыток!")
+
             captcha_state = captcha["captchaState"]
 
-            while True:
-                if tool.solve_captcha(
-                    xsrf_token=xsrf,
-                    captcha_state=captcha_state,
-                    referer_url=otp_url,
-                ):
-                    logger.info("Капча принята")
-                    params["captchaState"] = captcha_state
-                    break
-                logger.warning("Неправильная капча!")
+            solution = tool.solve_captcha(
+                captcha_state=captcha_state,
+                referer_url=redirect_url,
+            )
 
-        # 3. Ввод кода
+            params["captchaText"] = solution.text
+            params["captchaKey"] = solution.key
+            params["captchaState"] = solution.state
+
+        # Ввод кода
         code_from = ["SMS", "Email"][is_email]
         code_icon = ["📱", "📧"][is_email]
         code = input(
@@ -152,14 +168,14 @@ class Operation(BaseOperation):
             raise OperationError("Код подтверждения не может быть пустым.")
 
         params = {
-            "_xsrf": xsrf,
-            "failUrl": fail_url,
-            "remember": "yes",
             "username": username,
-            "password": "",
             "code": code,
-            "backurl": backurl,
+            "backurl": redirect_url,
             "operationType": "applicant_otp_auth",
+            "isApplicantSignup": "false",
+            "remember": "true",
+            # Не знаю от чего их вычислять и нужны ли они тут
+            "loginTrustFlags": self._login_trust_flags(pubkey),
             "authScenario": "APPLICANT_AUTH",
         }
 
@@ -167,15 +183,18 @@ class Operation(BaseOperation):
         r = session.post(
             by_code_url,
             data=params,
-            headers=ajax_headers,
+            headers=login_headers,
         )
 
         logger.debug(f"{r.request.method} {r.url} {r.status_code}")
 
         try:
             res = r.json()
-        except json.JSONDecodeError:
-            raise OperationError("Неизвестная ошибка!")
+        except json.JSONDecodeError as ex:
+            logger.debug(r.text[:255])
+            raise OperationError(
+                "Сервер не вернул JSON в ответ на отправку кода!"
+            ) from ex
 
         logger.debug(res)
 
@@ -183,13 +202,18 @@ class Operation(BaseOperation):
             error_key = res.get("error", {}).get("key", "UNKNOWN_ERROR")
             raise OperationError(f"Ошибка авторизации: {error_key}")
 
-        assert res.get("verification", {}).get("success")
+        if not res.get("verification", {}).get("success"):
+            raise OperationError("Верификация не пройдена!")
 
         # Теперь нужно проверить заголовки
+        backurl = parse_qs(urlsplit(redirect_url).query)["backurl"][0]
         r = session.get(
-            res["backurl"],
+            urljoin(redirect_url, backurl),
+            headers={"Referer": redirect_url},
             allow_redirects=False,
         )
+
+        logger.debug(f"{r.url} {r.status_code}")
 
         if r.status_code != 302 or not (location := r.headers.get("location")):
             raise OperationError(
@@ -214,21 +238,28 @@ class Operation(BaseOperation):
         # Куки уже лежат в tool.session — копировать ничего не нужно.
         print("🎉 Авторизация прошла успешно!")
 
-    def _normalize_phone_number(self, phone: str) -> str:
+    @staticmethod
+    def _normalize_phone_number(phone: str) -> str:
         # Удаляем всякий мусор типа (, ) и -
         phone = re.sub(r"\D", "", phone)
         if len(phone) == 11 and phone[0] == "8":
             phone = "7" + phone[1:]
         return phone
 
-    def _login_trust_flags(self, pubkey: str) -> str:
-        public_key = serialization.load_pem_public_key(pubkey.encode())
+    @staticmethod
+    def _login_trust_flags(
+        pubkey: str,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
         payload = {
-            "emailOrPhone": {"suggest": True, "paste": False},
+            **(payload or {}),
+            # Временная метка при шифровании на фронте устанавливается принудительно
             "ts": int(time.time() * 1000),
         }
+        logger.debug("trust login data: %r", payload)
         # JSON.stringify -> компактный вывод, без пробелов
         plaintext = json.dumps(payload, separators=(",", ":")).encode()
+        public_key = serialization.load_pem_public_key(pubkey.encode())
         ciphertext = public_key.encrypt(
             plaintext,
             padding.OAEP(

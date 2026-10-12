@@ -427,8 +427,10 @@ class Operation(BaseOperation):
         self.total_pages = args.total_pages
 
         # Системные промпты - обычный текст, пользовательские - шаблоны
-        self.cover_letter_prompt = args.cover_letter_prompt
-        self.ai_filter_prompt = args.ai_filter_prompt
+        self.cover_letter_prompt = (
+            args.cover_letter_prompt or DEFAULT_COVER_LETTER_PROMPT
+        )
+        self.ai_filter_prompt = args.ai_filter_prompt or DEFAULT_AI_FILTER_PROMPT
         self.ai_filter = bool(args.ai_filter)
 
         self.cover_letter_ai = self.vacancy_filter_ai = None
@@ -437,14 +439,14 @@ class Operation(BaseOperation):
             c.setdefault("system_prompt", DEFAULT_COVER_LETTER_SYSTEM_PROMPT)
             c.setdefault("temperature", 0.8)
             if args.cover_letter_system_prompt:
-                c["system_propmpt"] = args.cover_letter_system_prompt
+                c["system_prompt"] = args.cover_letter_system_prompt
             self.cover_letter_ai = tool.get_ai_client(**c)
 
             if self.ai_filter:
                 c = tool.get_openai_config("openai.vacancy_filter")
-                c.setdefault("system_propmt", DEFAULT_AI_FILTER_PROMPT)
+                c.setdefault("system_prompt", DEFAULT_AI_FILTER_SYSTEM_PROMPT)
                 if args.ai_filter_system_prompt:
-                    c["system_propmpt"] = args.cover_letter_system_prompt
+                    c["system_prompt"] = args.ai_filter_system_prompt
                 self.vacancy_filter_ai = tool.get_ai_client(**c)
 
         self.apply_mail_subject = (

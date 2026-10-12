@@ -279,7 +279,7 @@ class TestReplyToChat:
 
         op.reply_to_chat(_parse(op, item))
 
-        op.tool.get_chat_ai.assert_not_called()
+        op.tool.get_ai_client.assert_not_called()
         op.send_chat_message.assert_not_called()
 
 
@@ -385,7 +385,48 @@ class TestChatUrl:
         assert op.chat_url == "https://chatik.hh.ru"
 
 
+class TestAiClient:
+    def test_client_from_chat_section(self):
+        """В v2.0.8 клиент создавался без конфига, то есть без ключа."""
+        op = Operation()
+        op.tool = MagicMock()
+        op.tool.get_openai_config.return_value = {"api_key": "k", "model": "m"}
+
+        assert op.ai_client is op.tool.get_ai_client.return_value
+        op.tool.get_openai_config.assert_called_once_with("openai.chat")
+        op.tool.get_ai_client.assert_called_once_with(api_key="k", model="m")
+
+
+class _CountingEvent(Event):
+    def __init__(self):
+        super().__init__()
+        self.waits: list[float] = []
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        return self.is_set()
+
+
 class TestRun:
+    def test_waits_interval_between_passes(self):
+        """В v2.0.8 пауза пропала, и цикл опрашивал hh без перерыва."""
+        cancel = _CountingEvent()
+        op = Operation()
+        calls = []
+
+        def chats(_max_pages):
+            calls.append(1)
+            if len(calls) == 3:
+                cancel.set()
+            return []
+
+        op.get_chats_awaiting_reply = chats  # type: ignore[method-assign]
+        args = Namespace(max_pages=1, interval=30, delete=False, _cancel_event=cancel)
+
+        op.run(MagicMock(), args)
+
+        assert cancel.waits == [30, 30, 30]
+
     @pytest.mark.parametrize(
         "error",
         [

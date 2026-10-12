@@ -10,7 +10,6 @@ so they run in any environment (the real /me and /resumes/mine calls return
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from hh_applicant_tool.operations.apply_vacancies import Operation
@@ -28,28 +27,17 @@ def _make_vacancy(i: int) -> dict:
 
 def _make_operation(max_responses: int = 5) -> Operation:
     op = Operation()
-    # Namespace-like args used by _apply_resume.
-    # NOTE: `args` is a read-only property backed by `_args` (set in run()).
-    op._args = SimpleNamespace(
-        skip_tests=False,
-        send_email=False,
-        letter_file=None,
-        use_ai=False,
-        system_prompt="",
-        ai_rate_limit=0,
-    )
+    # Attributes that run() sets from args before _apply_resume
     op.max_responses = max_responses
     op.dry_run = False
-    op.ai_filter = None
+    op.ai_filter = False
     op.vacancy_filter_ai = None
-    op.excluded_filter = None
+    op.cover_letter_ai = None
+    op.excluded_pat = None
     op.cover_letter = "hello"
-    op.force_message = False
+    op.force_letter = False
     op.send_email = False
-    op.json_decoder = __import__(
-        "hh_applicant_tool.utils.json",
-        fromlist=["JSONDecoder"],
-    ).JSONDecoder()
+    op.skip_tests = False
 
     # Mocked tool with a storage that no-ops saves
     tool = MagicMock()

@@ -364,10 +364,15 @@ class HHApplicantTool(BaseAttrs):
         if not parents:
             return {}
 
-        result = deepcopy(parents[-1])
+        result = {}
 
-        for parent in reversed(parents[:-1]):
+        for parent in reversed(parents):
             for key, value in parent.items():
+                # Словари - это подсекции (openai.captcha, openai.chat), а не
+                # параметры. Иначе они уходят в ChatOpenAI лишними
+                # аргументами и он падает с TypeError
+                if isinstance(value, dict):
+                    continue
                 result.setdefault(key, deepcopy(value))
 
         return result

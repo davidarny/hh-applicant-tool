@@ -128,6 +128,47 @@ def test_heavy_mode_ignores_prompt() -> None:
     assert system_prompt.startswith("\nОпредели, подходит ли вакансия кандидату.")
 
 
+def test_heavy_check_sends_vacancy_description() -> None:
+    """Scenario: the heavy check sends the full vacancy to the filter AI.
+
+    Given a vacancy whose full card has a description
+    When the heavy suitability check runs
+    Then the filter AI receives the vacancy name and description
+    """
+    operation = _make_operation()
+    operation.tool.api_client.get.return_value = {
+        "description": "<p>React и TypeScript</p>"
+    }
+    operation.vacancy_filter_ai = MagicMock()
+    operation.vacancy_filter_ai.complete.return_value = "true"
+
+    assert operation._is_vacancy_suitable_heavy({"id": "1", "name": "Frontend"})
+
+    prompt = operation.vacancy_filter_ai.complete.call_args.args[0]
+    assert "Вакансия: Frontend" in prompt
+    assert "Описание: React и TypeScript" in prompt
+
+
+def test_light_check_sends_key_skills() -> None:
+    """Scenario: the light check sends only key skills to the filter AI.
+
+    Given a vacancy with key skills
+    When the light suitability check runs
+    Then the filter AI receives the vacancy name and key skills
+    """
+    operation = _make_operation()
+    operation.tool.api_client.get.return_value = {
+        "key_skills": [{"name": "React"}, {"name": "TypeScript"}]
+    }
+    operation.vacancy_filter_ai = MagicMock()
+    operation.vacancy_filter_ai.complete.return_value = "false"
+
+    assert not operation._is_vacancy_suitable_light({"id": "1", "name": "Frontend"})
+
+    prompt = operation.vacancy_filter_ai.complete.call_args.args[0]
+    assert "Ключевые навыки: React, TypeScript" in prompt
+
+
 def test_filter_client_sends_system_prompt_in_openai_payload() -> None:
     """Scenario: the filter prompt is present in the outbound AI request.
 

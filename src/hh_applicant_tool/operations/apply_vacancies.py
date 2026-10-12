@@ -1115,6 +1115,10 @@ class Operation(BaseOperation):
                                         result,
                                     )
 
+                            # Какой-то негодяй тут continue убрал и отклик
+                            # повторно отправлялся
+                            continue
+
                     except Exception as ex:
                         logger.error(f"Произошла непредвиденная ошибка: {ex}")
                         continue

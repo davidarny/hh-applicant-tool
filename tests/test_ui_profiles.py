@@ -9,7 +9,7 @@ from hh_applicant_tool.ui.profiles import (
     ProfileValidationError,
     ProfilesManager,
 )
-from hh_applicant_tool.utils.config import Config
+from hh_applicant_tool.utils.config import ConfigJSON, ConfigTOML
 
 
 class _Closable:
@@ -40,16 +40,21 @@ def test_list_profiles_discovers_directories_and_saved_token(tmp_path):
 
     (tmp_path / "work").mkdir()
     (tmp_path / ".second").mkdir()
-    Config(tmp_path / "work" / "config.toml").save(
+    (tmp_path / "home").mkdir()
+    ConfigTOML(tmp_path / "work" / "config.toml").save(
         token={"access_token": "token"}
+    )
+    ConfigJSON(tmp_path / "home" / "auth.json").save(
+        token={"refresh_token": "token"}
     )
 
     profiles = manager.list_profiles()
     by_id = {profile["id"]: profile for profile in profiles}
 
-    assert list(by_id) == [".", ".second", "work"]
+    assert list(by_id) == [".", ".second", "home", "work"]
     assert by_id["."]["active"] is True
     assert by_id["work"]["has_token"] is True
+    assert by_id["home"]["has_token"] is True
     assert by_id[".second"]["has_token"] is False
 
 
@@ -107,7 +112,7 @@ def test_delete_non_active_profile_removes_directory(tmp_path):
     tool = _Tool(tmp_path)
     manager = ProfilesManager(tool)
     manager.create_profile("old")
-    Config(tmp_path / "old" / "config.json").save(test=True)
+    ConfigJSON(tmp_path / "old" / "config.json").save(test=True)
 
     manager.delete_profile("old")
 

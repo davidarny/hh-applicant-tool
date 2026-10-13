@@ -6,8 +6,8 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..constants import CONFIG_DIR, CONFIG_FILENAME
-from ..utils.config import Config
+from ..constants import AUTH_CONFIG_FILENAME, CONFIG_DIR, CONFIG_FILENAME
+from ..utils.config import ConfigJSON, ConfigTOML
 
 if TYPE_CHECKING:
     from ..tool import HHApplicantTool
@@ -81,11 +81,13 @@ class ProfilesManager:
 
     @staticmethod
     def _has_token(path: Path) -> bool:
-        config_path = path / CONFIG_FILENAME
-        if not config_path.exists():
-            return False
+        # С 2.1.0 токен лежит в auth.json, в старых профилях - в конфиге
         try:
-            token = Config(config_path).get("token") or {}
+            token = (
+                ConfigJSON(path / AUTH_CONFIG_FILENAME).get("token")
+                or ConfigTOML(path / CONFIG_FILENAME).get("token")
+                or {}
+            )
             return bool(token.get("access_token") or token.get("refresh_token"))
         except (OSError, ValueError, TypeError):
             return False

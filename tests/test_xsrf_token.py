@@ -11,14 +11,16 @@
 
 from __future__ import annotations
 
-from http.cookiejar import Cookie, CookieJar
+from http.cookiejar import Cookie
+
+from requests.cookies import RequestsCookieJar
 
 from hh_applicant_tool.main import HHApplicantTool
 
 
-def cookie_jar(data: dict[str, str]) -> CookieJar:
-    """Настоящий CookieJar из данных {name: value} (домен .hh.ru)."""
-    jar = CookieJar()
+def cookie_jar(data: dict[str, str]) -> RequestsCookieJar:
+    """CookieJar как у requests.Session из {name: value} (домен .hh.ru)."""
+    jar = RequestsCookieJar()
     for name, value in data.items():
         jar.set_cookie(
             Cookie(

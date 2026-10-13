@@ -26,7 +26,7 @@ logger = logging.getLogger("hh-applicant-tool")
 
 
 class Operation(BaseOperation):
-    """Авторизация на сайте и через мобильное приложение"""
+    """Авторизация на сайте и через мобильное приложение. Ранее введенный логин запоминается и будет использован, если не указать его."""
 
     __aliases__: list = ["authenticate", "auth", "login"]
 
@@ -61,7 +61,7 @@ class Operation(BaseOperation):
             skip_choose_account="true",
         )
         logger.info(
-            f"Эту ссылку можно открыть в браузере для изучения процесса авторизации: {authorize_url=}"
+            f"Эту ссылку можно открыть в браузере для изучения процесса авторизации: {authorize_url}"
         )
         # Переход на страницу нужен для установки cookie xsrf_token
         r = session.get(authorize_url)

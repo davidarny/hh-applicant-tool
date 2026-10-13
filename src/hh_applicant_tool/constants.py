@@ -7,6 +7,7 @@ from . import utils
 
 CONFIG_DIR = utils.get_config_directory()
 CONFIG_FILENAME = "config.toml"
+AUTH_CONFIG_FILENAME = "auth.json"
 LOG_FILENAME = "log.txt"
 DATABASE_FILENAME = "data"
 COOKIES_FILENAME = "cookies.txt"
@@ -24,3 +25,9 @@ REPO_URL = "https://github.com/s3rgeym/hh-applicant-tool/"
 # значение приходит от hh.ru в верхнем регистре, но понимает и в
 # нижнем
 DEFAULT_CAPTCHA_LANGUAGE = "RU"
+
+ANDROID_WEBVIEW_USERAGENT = "Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ3A.230901.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/118.0.0.0 Mobile Safari/537.36"
+
+# Android-приложение перенаправляет на данную ссылку.
+# Не знаю учитывается ли.
+CAPTCHA_SUCCESS_BACKURL = "hh://applicant/captchaSuccessBackUrl"

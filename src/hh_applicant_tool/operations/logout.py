@@ -5,8 +5,6 @@ import argparse
 import logging
 from typing import TYPE_CHECKING
 
-from hh_applicant_tool.api.errors import ApiError
-
 from ..tool import BaseNamespace, BaseOperation
 
 if TYPE_CHECKING:
@@ -21,7 +19,7 @@ class Namespace(BaseNamespace):
 
 
 class Operation(BaseOperation):
-    """Выход из профиля"""
+    """Выходит из профиля и удаляет токены, а так же очищает куки"""
 
     __aliases__: list[str] = ["exit"]
 
@@ -29,8 +27,6 @@ class Operation(BaseOperation):
         pass
 
     def run(self, tool: HHApplicantTool, args: BaseNamespace) -> None:
-        try:
-            tool.api_client.delete("/oauth/token")
-        except ApiError as ex:
-            logger.error(f"Ошибка при выходе из профиля: {ex}")
+        tool.logout()
         tool.session.cookies.clear()
+        tool.auth_config.unlink()

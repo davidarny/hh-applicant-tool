@@ -147,7 +147,7 @@ class Operation(BaseOperation):
         # В 2.0.8 апстрим создаёт клиента без конфига, без ключа он не
         # работает. Берём ключ и модель из секции openai.chat
         return self.tool.get_ai_client(
-            **self.tool.get_openai_config("openai.chat")
+            **self.tool.get_openai_args("openai.chat")
         )
 
     @cached_property

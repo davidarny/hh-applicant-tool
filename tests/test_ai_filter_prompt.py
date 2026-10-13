@@ -41,7 +41,7 @@ def _run(argv: list[str]) -> dict[str, ChatOpenAI]:
 
     tool = MagicMock()
     tool.config = {}
-    tool.get_openai_config.side_effect = lambda section: {
+    tool.get_openai_args.side_effect = lambda section: {
         "api_key": "k",
         "base_url": "https://example.test/v1/chat/completions",
         "model": section,

@@ -390,10 +390,10 @@ class TestAiClient:
         """В v2.0.8 клиент создавался без конфига, то есть без ключа."""
         op = Operation()
         op.tool = MagicMock()
-        op.tool.get_openai_config.return_value = {"api_key": "k", "model": "m"}
+        op.tool.get_openai_args.return_value = {"api_key": "k", "model": "m"}
 
         assert op.ai_client is op.tool.get_ai_client.return_value
-        op.tool.get_openai_config.assert_called_once_with("openai.chat")
+        op.tool.get_openai_args.assert_called_once_with("openai.chat")
         op.tool.get_ai_client.assert_called_once_with(api_key="k", model="m")
 
 

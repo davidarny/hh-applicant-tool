@@ -487,6 +487,8 @@ class HHApplicantTool:
             for k, v in c.items()
             if k
             in [
+                # Без ключа ChatOpenAI не создать: это обязательный аргумент
+                "api_key",
                 "base_url",
                 "connect_timeout",
                 "delay",

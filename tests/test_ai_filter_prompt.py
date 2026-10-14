@@ -1,9 +1,9 @@
 """Промпты AI-фильтра и сопроводительных писем в apply-vacancies.
 
-С 2.0.8 системные промпты задаются простым текстом, а пользовательские
-промпты - шаблонами с %(name)s. В апстриме при этом остались опечатки
-в ключе system_prompt, и любой запуск с --use-ai падал на создании
-клиента.
+С 2.2 промпты задаются только в конфиге: системные - в секциях
+[openai.cover_letter] и [openai.vacancy_filter], шаблоны с %(name)s - в
+[general]. В апстриме фильтр получает опечатку system_propmt, на которой
+ChatOpenAI падает с TypeError.
 """
 
 from __future__ import annotations
@@ -31,20 +31,24 @@ class _Response:
         return {"choices": [{"message": {"content": "true"}}]}
 
 
-def _run(argv: list[str]) -> dict[str, ChatOpenAI]:
-    """Запускает run() с настоящим ChatOpenAI, без рассылки."""
+def _run(
+    general: dict | None = None,
+    sections: dict[str, dict] | None = None,
+) -> dict:
+    """Запускает run() с --ai-filter и настоящим ChatOpenAI, без рассылки."""
     op = Operation()
     parser = ArgumentParser()
     op.setup_parser(parser)
-    args = parser.parse_args(argv)
+    args = parser.parse_args(["--ai-filter"])
     args.use_ai = True
 
     tool = MagicMock()
-    tool.config = {}
+    tool.general_config = general or {}
     tool.get_openai_args.side_effect = lambda section: {
         "api_key": "k",
         "base_url": "https://example.test/v1/chat/completions",
         "model": section,
+        **(sections or {}).get(section, {}),
     }
     tool.get_ai_client.side_effect = lambda **kw: ChatOpenAI(**kw)
     op._apply_vacancies = MagicMock()  # type: ignore[method-assign]
@@ -58,16 +62,13 @@ def _run(argv: list[str]) -> dict[str, ChatOpenAI]:
     }
 
 
-def test_system_prompts_from_flags_reach_clients() -> None:
-    """Каждый клиент получает свой системный промпт из флагов."""
+def test_system_prompts_from_config_reach_clients() -> None:
+    """Каждый клиент получает системный промпт из своей секции."""
     clients = _run(
-        [
-            "--ai-filter",
-            "--ai-filter-system-prompt",
-            "Только Python",
-            "--cover-letter-system-prompt",
-            "Пиши коротко",
-        ]
+        sections={
+            "openai.cover_letter": {"system_prompt": "Пиши коротко"},
+            "openai.vacancy_filter": {"system_prompt": "Только Python"},
+        }
     )
 
     assert clients["cover_letter"].system_prompt == "Пиши коротко"
@@ -75,15 +76,26 @@ def test_system_prompts_from_flags_reach_clients() -> None:
 
 
 def test_default_system_prompts() -> None:
-    clients = _run(["--ai-filter"])
+    clients = _run()
 
     assert clients["cover_letter"].system_prompt == DEFAULT_COVER_LETTER_SYSTEM_PROMPT
     assert clients["vacancy_filter"].system_prompt == DEFAULT_AI_FILTER_SYSTEM_PROMPT
 
 
-def test_default_prompt_templates_are_used_without_flags() -> None:
-    """Без --cover-letter-prompt и --ai-filter-prompt берутся шаблоны по умолчанию."""
-    op = _run(["--ai-filter"])["op"]
+def test_prompt_templates_from_general_config() -> None:
+    op = _run(
+        general={
+            "cover_letter_prompt": "Письмо на %(vacancy_name)s",
+            "ai_filter_prompt": "Подходит ли %(vacancy_name)s?",
+        }
+    )["op"]
+
+    assert op.cover_letter_prompt == "Письмо на %(vacancy_name)s"
+    assert op.ai_filter_prompt == "Подходит ли %(vacancy_name)s?"
+
+
+def test_default_prompt_templates_without_config() -> None:
+    op = _run()["op"]
 
     assert "%(vacancy_name)s" in op.cover_letter_prompt
     assert "%(vacancy_description)s" in op.ai_filter_prompt

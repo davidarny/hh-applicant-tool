@@ -38,6 +38,7 @@ def test_section_inherits_default_params(tmp_path: Path) -> None:
         "api_key": "k",
         "base_url": "https://example.test/v1/chat/completions",
         "temperature": 0.3,
+        "proxy_url": "socks5://127.0.0.1:1080",
         "model": "vision",
     }
 

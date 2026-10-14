@@ -11,13 +11,14 @@ SHELL=/bin/bash
 # вторых, чтобы антиспам не сработал
 0 */5 * * * /bin/bash -c 'sleep $((60 + RANDOM \% 241))' && /usr/local/bin/python -m hh_applicant_tool update-resumes >> /var/log/cron.log 2>&1
 
-# Рассылаем отклики. Поиск, AI-фильтр и письма настроены в config/apply.sh
+# Рассылаем отклики. Поиск задан в config/apply.sh, промпты фильтра и писем
+# в config/config.toml
 0 8-21 * * * /bin/bash -c 'sleep $((60 + RANDOM \% 241))' && /bin/bash /app/config/apply.sh >> /var/log/cron.log 2>&1
 
-# AI-автоответчик в чатах с работодателями, работает постоянно.
-# --use-ai нужен, чтобы капчу решала модель: без него hh-applicant-tool
-# открывает окно tkinter, которого в контейнере нет
-@reboot /usr/local/bin/python -m hh_applicant_tool -v --use-ai autoresponder >> /var/log/cron.log 2>&1
+# AI-автоответчик в чатах с работодателями, проход раз в минуту.
+# Без --use-ai reply-chats открывает vim для ручного ответа, а капча
+# показывается в окне tkinter, которого в контейнере нет
+@reboot /usr/local/bin/python -m hh_applicant_tool -v --use-ai reply-chats --loop-delay 60 >> /var/log/cron.log 2>&1
 
 # Раскомментируй, если хочешь удалять чаты с отказами
 #0 */1 * * * /bin/bash -c 'sleep $((60 + RANDOM \% 241))' && /usr/local/bin/python -m hh-applicant-tool clear-negotiations -d >> /var/log/cron.log 2>&1

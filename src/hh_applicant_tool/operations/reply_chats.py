@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generator
 from urllib.parse import urljoin
 
-from ..api import ApiError
+import requests
+
+from ..api import ApiError, BadResponse
 from ..tool import BaseNamespace, BaseOperation
 from ..utils.date import parse_api_datetime
 from ..utils.string import render_template
@@ -124,6 +126,7 @@ class Namespace(BaseNamespace):
     dry_run: bool
     loop_delay: int | None
     editor: str
+    leave_discarded: bool
 
 
 @dataclass
@@ -221,6 +224,12 @@ class Operation(BaseOperation):
             default="vim",
             help="Редактор для интерактивного режима (когда AI не используется)",  # noqa: E501
         )
+        parser.add_argument(
+            "--leave-discarded",
+            help="Выходить из чатов с отказом. Без флага такие чаты остаются в списке",  # noqa: E501
+            default=False,
+            action=argparse.BooleanOptionalAction,
+        )
 
     # ---------------------------------------------------------------- run
 
@@ -233,6 +242,7 @@ class Operation(BaseOperation):
         self.dry_run = args.dry_run
         self.loop_delay = args.loop_delay
         self.editor = args.editor
+        self.leave_discarded = args.leave_discarded
         self.ignored_chats: set[int] = set()
 
         self.user_prompt: str = (
@@ -270,7 +280,19 @@ class Operation(BaseOperation):
 
     def run_loop(self) -> int:
         while True:
-            self.reply_chats()
+            try:
+                self.reply_chats()
+            except (BadResponse, requests.RequestException) as ex:
+                if not self.loop_delay:
+                    raise
+                # Обрыв соединения или 502 от hh: разовый сбой, трейсбек не
+                # нужен, следующая попытка через loop_delay
+                logger.error("Ошибка получения чатов: %s", ex)
+            except Exception:
+                if not self.loop_delay:
+                    raise
+                # Иначе любая ошибка останавливает автоответчик до рестарта
+                logger.exception("Ошибка при ответе в чатах")
 
             if not self.loop_delay:
                 return 0
@@ -598,6 +620,12 @@ class Operation(BaseOperation):
                 if item["id"] in self.ignored_chats:
                     continue
 
+                # Чат закрыт для сообщений, например на время проверки
+                # работодателя: hh ответит 409. У чатов с кнопками
+                # writeMessageState не проверяется
+                if item.get("blockInfo"):
+                    continue
+
                 resume = None
                 resume_ref = None
                 for ref in (item.get("resources") or {}).get("RESUME") or []:
@@ -620,7 +648,9 @@ class Operation(BaseOperation):
                     continue
 
                 if chat.is_discard:
-                    result.append(chat)
+                    # Переписка с отказом остаётся, если не просили выходить
+                    if self.leave_discarded:
+                        result.append(chat)
                     continue
 
                 if not self.is_chat_awaiting_reply(chat):
@@ -679,7 +709,11 @@ class Operation(BaseOperation):
             return
 
         for chat in chats:
-            self.process_chat(chat, blacklist)
+            try:
+                self.process_chat(chat, blacklist)
+            except (ApiError, requests.HTTPError) as ex:
+                # Ошибка в одном чате не должна обрывать проход по остальным
+                logger.error("Ошибка ответа в чате %s: %s", chat.chat_id, ex)
 
         print("📝 Сообщения разосланы!")
 

@@ -16,9 +16,9 @@ SHELL=/bin/bash
 0 8-21 * * * /bin/bash -c 'sleep $((60 + RANDOM \% 241))' && /bin/bash /app/config/apply.sh >> /var/log/cron.log 2>&1
 
 # AI-автоответчик в чатах с работодателями, проход раз в минуту.
-# Без --use-ai reply-chats открывает vim для ручного ответа, а капча
-# показывается в окне tkinter, которого в контейнере нет
-@reboot /usr/local/bin/python -m hh_applicant_tool -v --use-ai reply-chats --loop-delay 60 >> /var/log/cron.log 2>&1
+# С 2.3 reply-chats делает один проход, цикл задаём здесь. Сбой одного
+# прохода не останавливает следующие. AI с 2.3 включён по умолчанию
+@reboot /bin/bash -c 'while true; do /usr/local/bin/python -m hh_applicant_tool -v reply-chats; sleep 60; done' >> /var/log/cron.log 2>&1
 
 # Раскомментируй, если хочешь удалять чаты с отказами
 #0 */1 * * * /bin/bash -c 'sleep $((60 + RANDOM \% 241))' && /usr/local/bin/python -m hh-applicant-tool clear-negotiations -d >> /var/log/cron.log 2>&1

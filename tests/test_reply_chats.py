@@ -1,22 +1,19 @@
 """Автоответчик reply-chats в форке.
 
 В 2.2 апстрим заменил autoresponder на reply-chats. Форк возвращает то, без
-чего автоответчик в контейнере не живёт: цикл переживает сбои hh, ошибка в
-одном чате не обрывает проход, а из чатов с отказом бот выходит только по
-флагу.
+чего автоответчик не живёт: ошибка в одном чате не обрывает проход, чаты,
+закрытые для сообщений, пропускаются, а из чатов с отказом бот выходит
+только по флагу. Цикл с 2.3 внешний, его задаёт crontab.
 """
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 import requests
 
-from hh_applicant_tool.operations import reply_chats
 from hh_applicant_tool.operations.reply_chats import Operation
 
 NOW = datetime.now(timezone.utc).isoformat()
@@ -92,6 +89,7 @@ def test_chat_error_does_not_stop_other_chats(caplog):
     op.tool = MagicMock()
     op.tool.get_blacklisted.return_value = []
     op.max_pages = 1
+    op.get_unread_count = MagicMock(return_value={"unreadCount": 2})
     op.get_chats_awaiting_reply = MagicMock(
         return_value=[SimpleNamespace(chat_id=1), SimpleNamespace(chat_id=2)]
     )
@@ -103,37 +101,3 @@ def test_chat_error_does_not_stop_other_chats(caplog):
 
     assert op.process_chat.call_count == 2
     assert "Ошибка ответа в чате 1: 409 Conflict" in caplog.text
-
-
-class TestRunLoop:
-    def test_loop_survives_errors(self, monkeypatch, caplog):
-        """Сбой hh или неожиданная ошибка не останавливают цикл."""
-        sleeps: list[float] = []
-        monkeypatch.setattr(reply_chats.time, "sleep", sleeps.append)
-        op = Operation()
-        op.loop_delay = 60
-        op.reply_chats = MagicMock(
-            side_effect=[
-                requests.ConnectionError("boom"),
-                RuntimeError("bad"),
-                None,
-                KeyboardInterrupt,
-            ]
-        )
-
-        with caplog.at_level(logging.ERROR), pytest.raises(KeyboardInterrupt):
-            op.run_loop()
-
-        assert sleeps == [60, 60, 60]
-        network, other = caplog.records
-        assert network.getMessage() == "Ошибка получения чатов: boom"
-        assert network.exc_info is None
-        assert other.exc_info is not None
-
-    def test_single_pass_raises(self):
-        op = Operation()
-        op.loop_delay = None
-        op.reply_chats = MagicMock(side_effect=requests.ConnectionError("boom"))
-
-        with pytest.raises(requests.ConnectionError):
-            op.run_loop()

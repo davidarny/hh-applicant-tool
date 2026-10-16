@@ -18,7 +18,7 @@ CONFIG = {
     "openai": {
         "default": {
             "api_key": "k",
-            "base_url": "https://example.test/v1/chat/completions",
+            "base_url": "https://example.test/v1",
             "temperature": 0.3,
             "proxy_url": "socks5://127.0.0.1:1080",
         },
@@ -34,9 +34,9 @@ def _tool(tmp_path: Path) -> HHApplicantTool:
 
 
 def test_section_inherits_default_params(tmp_path: Path) -> None:
-    assert _tool(tmp_path).get_openai_args("openai.captcha") == {
+    assert _tool(tmp_path).get_openai_settings("openai.captcha") == {
         "api_key": "k",
-        "base_url": "https://example.test/v1/chat/completions",
+        "base_url": "https://example.test/v1",
         "temperature": 0.3,
         "proxy_url": "socks5://127.0.0.1:1080",
         "model": "vision",
@@ -44,14 +44,14 @@ def test_section_inherits_default_params(tmp_path: Path) -> None:
 
 
 def test_section_overrides_default_params(tmp_path: Path) -> None:
-    args = _tool(tmp_path).get_openai_args("openai.chat")
+    settings = _tool(tmp_path).get_openai_settings("openai.chat")
 
-    assert args["temperature"] == 0.5
+    assert settings["temperature"] == 0.5
 
 
-def test_args_build_client(tmp_path: Path) -> None:
+def test_settings_build_client(tmp_path: Path) -> None:
     """В 2.1.0 ключ отфильтровывался, и ChatOpenAI падал с TypeError."""
-    client = ChatOpenAI(**_tool(tmp_path).get_openai_args("openai.chat"))
+    client = ChatOpenAI(**_tool(tmp_path).get_openai_settings("openai.chat"))
 
     assert client.api_key == "k"
     assert client.model == "chat"

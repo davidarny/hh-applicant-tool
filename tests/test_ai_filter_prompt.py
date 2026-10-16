@@ -2,8 +2,8 @@
 
 С 2.2 промпты задаются только в конфиге: системные - в секциях
 [openai.cover_letter] и [openai.vacancy_filter], шаблоны с %(name)s - в
-[general]. В апстриме фильтр получает опечатку system_propmt, на которой
-ChatOpenAI падает с TypeError.
+[general]. В 2.2 фильтр получал опечатку system_propmt, на которой
+ChatOpenAI падал с TypeError.
 """
 
 from __future__ import annotations
@@ -21,16 +21,6 @@ from hh_applicant_tool.operations.apply_vacancies import (
 from .test_apply_limit_shutdown import _make_operation
 
 
-class _Response:
-    status_code = 200
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict:
-        return {"choices": [{"message": {"content": "true"}}]}
-
-
 def _run(
     general: dict | None = None,
     sections: dict[str, dict] | None = None,
@@ -44,9 +34,9 @@ def _run(
 
     tool = MagicMock()
     tool.general_config = general or {}
-    tool.get_openai_args.side_effect = lambda section: {
+    tool.get_openai_settings.side_effect = lambda section: {
         "api_key": "k",
-        "base_url": "https://example.test/v1/chat/completions",
+        "base_url": "https://example.test/v1",
         "model": section,
         **(sections or {}).get(section, {}),
     }
@@ -129,10 +119,12 @@ def test_filter_client_sends_system_prompt_in_openai_payload() -> None:
     Then the outbound messages contain that prompt as the system message
     """
     session = MagicMock()
-    session.post.return_value = _Response()
+    response = session.post.return_value
+    response.status_code = 200
+    response.json.return_value = {"choices": [{"message": {"content": "true"}}]}
     client = ChatOpenAI(
         api_key="test-key",
-        base_url="https://example.test/v1/chat/completions",
+        base_url="https://example.test/v1",
         model="test-model",
         system_prompt="Only accept Python roles",
         session=session,
@@ -140,6 +132,10 @@ def test_filter_client_sends_system_prompt_in_openai_payload() -> None:
 
     assert client.complete("Вакансия: Python developer") == "true"
 
+    # С 2.3 base_url без /chat/completions, путь клиент добавляет сам
+    assert session.post.call_args.args[0] == (
+        "https://example.test/v1/chat/completions"
+    )
     payload = session.post.call_args.kwargs["json"]
     assert payload["messages"] == [
         {"role": "system", "content": "Only accept Python roles"},

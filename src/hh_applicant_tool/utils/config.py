@@ -12,13 +12,20 @@ from typing import Any
 import tomli_w
 
 from . import system
-from .common import remove_none
 from .package import PACKAGE_NAME
 
 
 @cache
 def get_config_directory() -> Path:
     return system.get_config_directory() / PACKAGE_NAME
+
+
+def remove_none(data: Any) -> Any:
+    if isinstance(data, dict):
+        return {k: remove_none(v) for k, v in data.items() if v is not None}
+    if isinstance(data, list):
+        return [remove_none(v) for v in data if v is not None]
+    return data
 
 
 class Config(dict, ABC):
@@ -70,8 +77,8 @@ class Config(dict, ABC):
     def unlink(self) -> None:
         self._path.unlink(missing_ok=True)
 
-    def __str__(self) -> str:
-        return str(self._path)
+    # def __str__(self) -> str:
+    #     return str(self._path)
 
 
 class ConfigJSON(Config):

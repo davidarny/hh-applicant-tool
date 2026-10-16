@@ -11,14 +11,9 @@ from urllib.parse import urlencode, urljoin
 
 import requests
 
-from ..utils.common import get_proxies_dict
+from ..utils.helpers import get_proxies_dict
 from . import errors
-from .client_keys import (
-    ANDROID_CLIENT_ID,
-    ANDROID_CLIENT_SECRET,
-)
 from .datatypes import AccessToken
-from .user_agent import generate_android_useragent
 
 __all__ = ("ApiClient", "OAuthClient")
 
@@ -64,7 +59,7 @@ class BaseClient:
     def __post_init__(self) -> None:
         self.delay = self.delay or DEFAULT_DELAY
         self.max_retries = self.max_retries or MAX_RETRIES
-        self.user_agent = self.user_agent or generate_android_useragent()
+        self.user_agent = self.user_agent
         class_name = self.__class__.__name__
         logger.debug(f"{class_name} User-Agent: {self.user_agent}")
 
@@ -75,10 +70,9 @@ class BaseClient:
     def _default_headers(self) -> dict[str, str]:
         return {
             "Accept": "application/json",
-            "User-Agent": self.user_agent,
             "X-Force-App-Access": "true",  # Из исходников офиц приложения
             "X-HH-App-Active": "true",
-        }
+        } | ({"User-Agent": self.user_agent} if self.user_agent else {})
 
     def _wait_for_delay(self, delay: float | None = None) -> None:
         """Выдерживает паузу между запросами.
@@ -121,9 +115,14 @@ class BaseClient:
         for attempt in range(1, self.max_retries + 1):
             with self._lock:
                 self._wait_for_delay(delay)
+
+                def kv(d: dict) -> str:
+                    return "; ".join(f"{k}={v!r}" for k, v in d.items())
+
                 logger.debug(
-                    f"({attempt}/{self.max_retries}) {method} {url} | {payload=}",
+                    f"({attempt}/{self.max_retries}) {method} {url} {kv(payload)}",
                 )
+
                 try:
                     # Заголовки собираются на каждой попытке, чтобы
                     # подхватывать обновлённый access token.
@@ -190,18 +189,13 @@ class BaseClient:
 
 @dataclass
 class OAuthClient(BaseClient):
-    client_id: str | None = None
-    client_secret: str | None = None
+    client_id: str
+    client_secret: str
     _: dataclasses.KW_ONLY
     base_url: str = HH_OAUTH_URL
     state: str = ""
     scope: str = ""
     redirect_uri: str = ""
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        self.client_id = self.client_id or ANDROID_CLIENT_ID
-        self.client_secret = self.client_secret or ANDROID_CLIENT_SECRET
 
     def authorize_url(self, **kwargs: Any) -> str:
         params = dict(
@@ -212,7 +206,9 @@ class OAuthClient(BaseClient):
             state=self.state,
             **kwargs,
         )
-        query = urlencode({k: v for k, v in params.items() if v})
+        query = urlencode(
+            {k: v for k, v in params.items() if v is not None and v != ""}
+        )
         return self.resolve_url(f"/authorize?{query}")
 
     def request_access_token(
@@ -257,6 +253,7 @@ class ApiClient(BaseClient):
     captcha_handler: Callable[[str], bool] | None = None
     captcha_cooldown: float | None = None
     max_captcha_attempts: int | None = None
+    on_token_change: Callable[[str], None] | None = None
 
     _captcha_lock: Lock = field(
         default_factory=Lock, init=False, compare=False, repr=False
@@ -358,7 +355,7 @@ class ApiClient(BaseClient):
                     try:
                         self.refresh_access_token()
                     # Ошибка слишком общая
-                    except errors.ApiError:
+                    except (errors.BadRequest, errors.Forbidden):
                         self.reset_tokens()
                         raise
                     refreshed = True
@@ -367,11 +364,15 @@ class ApiClient(BaseClient):
         self.access_token = None
         self.refresh_token = None
         self.access_expires_at = 0
+        if self.on_token_change:
+            self.on_token_change(self.get_access_token())
 
     def handle_access_token(self, token: AccessToken) -> None:
         for name in ("access_token", "refresh_token", "access_expires_at"):
             if name in token and hasattr(self, name):
                 setattr(self, name, token[name])
+        if self.on_token_change:
+            self.on_token_change(self.get_access_token())
 
     def refresh_access_token(self) -> None:
         if not self.refresh_token:

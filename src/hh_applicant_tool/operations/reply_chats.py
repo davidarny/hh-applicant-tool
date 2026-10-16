@@ -5,22 +5,18 @@ from __future__ import annotations
 import argparse
 import logging
 import random
-import shutil
-import subprocess
-import tempfile
 import time
 import uuid
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import cached_property
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generator
+from typing import TYPE_CHECKING, Any, TypedDict
 from urllib.parse import urljoin
 
 import requests
 
-from ..api import ApiError, BadResponse
+from ..api import ApiError
+from ..errors import OperationError
 from ..tool import BaseNamespace, BaseOperation
 from ..utils.date import parse_api_datetime
 from ..utils.string import render_template
@@ -101,19 +97,6 @@ BOT_RECRUITER_ANSWER = (
     "который вы указали."
 )
 
-# Интерактивный режим: всё, что написано после последнего разделителя,
-# уходит в чат
-REPLY_SEPARATOR = "-------- ОТВЕТ ПИШИТЕ НИЖЕ ЭТОЙ СТРОКИ --------"
-
-# В редакторе показывается первое сообщение и столько последних
-EDITOR_HISTORY_TAIL = 4
-
-# Команды запуска: курсор в конце файла и сразу режим вставки.
-# Helix не поддерживает запуск команд через аргументы, поэтому его здесь нет
-EDITORS: dict[str, list[str]] = {
-    "vim": ["vim", "-c", "normal! G$", "-c", "startinsert!"],
-    "nvim": ["nvim", "-c", "normal! G$", "-c", "startinsert!"],
-}
 
 logger = logging.getLogger("hh-applicant-tool")
 
@@ -127,6 +110,304 @@ class Namespace(BaseNamespace):
     loop_delay: int | None
     editor: str
     leave_discarded: bool
+
+
+# ------------------------------------------------------------ типы ответов
+
+
+class UnreadCount(TypedDict):
+    unreadCount: int
+    unreadSupportCount: int
+
+
+class ParticipantDisplay(TypedDict):
+    name: str
+    isBot: bool
+
+
+class _ChatMessageRequired(TypedDict):
+    id: int
+    chatId: int
+    creationTime: str
+    text: str
+    resources: dict[str, Any]
+    type: str
+    canEdit: bool
+    canReact: bool
+    canDelete: bool
+    onlyVisibleForMyType: bool
+    flags: dict[str, Any]
+    hasContent: bool
+    hidden: bool
+    reactions: list[Any]
+    participantDisplay: ParticipantDisplay
+    participantId: str
+
+
+class WorkflowTransition(TypedDict):
+    id: int
+    topicId: int
+    applicantState: str
+    declinedByApplicant: bool
+
+
+class ChatMessage(_ChatMessageRequired, total=False):
+    # Приходят не во всех сообщениях
+    actions: dict[str, Any]
+    workflowTransitionId: int
+    workflowTransition: WorkflowTransition
+
+
+class ChatItemResources(TypedDict, total=False):
+    VACANCY: list[str]
+    RESUME: list[str]
+    NEGOTIATION_TOPIC: list[str]
+    RESPONSE_LETTER: list[str]
+    UNKNOWN: list[str]
+
+
+class ChatOperations(TypedDict):
+    allowed: list[str]
+
+
+class ChatItem(TypedDict):
+    id: int
+    type: str
+    subType: str | None
+    blockInfo: Any | None
+    unreadCount: int
+    resources: ChatItemResources
+    pinned: bool
+    notificationEnabled: bool
+    operations: ChatOperations
+    ownerViolatesRules: bool
+    currentParticipantId: str
+    lastMessage: ChatMessage | None
+    lastViewedByOpponentMessageId: int | None
+    lastViewedByCurrentUserMessageId: int | None
+    participantsIds: list[str]
+    onlineUntilTime: str | None
+    lastActivityTime: str
+
+
+class ChatsPage(TypedDict):
+    items: list[ChatItem]
+    found: int
+    nextFrom: str | None
+
+
+class ChatDisplayInfo(TypedDict):
+    title: str
+    subtitle: str
+    icon: str
+
+
+class ChatsResponse(TypedDict):
+    chats: ChatsPage
+    chatsDisplayInfo: dict[str, ChatDisplayInfo]
+    resources: dict[str, Any]
+
+
+# ---- ответ chat_data
+
+
+class WritePossibility(TypedDict):
+    name: str
+    writeDisabledReasons: list[str]
+
+
+class OwnerEmployerInfo(TypedDict):
+    id: int
+    state: str
+
+
+class ChatMessagesPage(TypedDict):
+    items: list[ChatMessage]
+    hasMore: bool
+
+
+class ChatDetails(TypedDict):
+    id: int
+    type: str
+    subType: str | None
+    blockInfo: Any | None
+    unreadCount: int
+    resources: ChatItemResources
+    pinned: bool
+    notificationEnabled: bool
+    writePossibility: WritePossibility
+    operations: ChatOperations
+    ownerViolatesRules: bool
+    ownerEmployerInfo: OwnerEmployerInfo
+    messages: ChatMessagesPage
+    currentParticipantId: str
+    lastViewedByOpponentMessageId: int | None
+    lastViewedByCurrentUserMessageId: int | None
+    participantsIds: list[str]
+    onlineUntilTime: str | None
+    lastActivityTime: str
+
+
+class VacancyCompany(TypedDict, total=False):
+    # Служебные поля с префиксом @ не описаны
+    id: int
+    name: str
+    visibleName: str
+    structureName: str
+    mainEmployerId: int
+    companySiteUrl: str
+    logos: dict[str, Any]
+    badges: dict[str, Any]
+
+
+# "from" — ключевое слово, поэтому функциональный синтаксис
+VacancyCompensation = TypedDict(
+    "VacancyCompensation",
+    {
+        "from": int,
+        "to": int,
+        "currencyCode": str,
+        "gross": bool,
+        "noCompensation": dict[str, Any],
+    },
+    total=False,
+)
+
+
+class VacancyLinks(TypedDict):
+    desktop: str
+    mobile: str
+
+
+class VacancyArea(TypedDict):
+    name: str
+    path: str
+
+
+class Vacancy(TypedDict, total=False):
+    # Описаны только основные поля, остальных у вакансии ещё много
+    vacancyId: int
+    name: str
+    company: VacancyCompany
+    compensation: VacancyCompensation
+    area: VacancyArea
+    links: VacancyLinks
+    creationTime: str
+    workExperience: str
+    employmentForm: str
+    closedForApplicants: bool
+    userTestPresent: bool
+    chatWritePossibility: str
+    professionalRoleIds: list[dict[str, Any]]
+    workFormats: list[dict[str, Any]]
+
+
+class ResumePhone(TypedDict):
+    type: str
+    country: str
+    city: str
+    number: str
+    formatted: str
+    raw: str
+    verified: bool
+    needVerification: bool
+    comment: str | None
+
+
+class ChatResume(TypedDict):
+    hash: str
+    id: int
+    userId: int
+    title: str
+    hiddenFields: list[str]
+    gender: str
+    phone: list[ResumePhone]
+
+
+class ParticipantName(TypedDict):
+    name: str
+
+
+class ParticipantTime(TypedDict):
+    dt: str
+
+
+class ParticipantRole(TypedDict):
+    name: str
+    display: str
+
+
+class ChatParticipant(TypedDict):
+    id: int
+    externalId: str
+    type: str
+    isCurrentUser: bool
+    key: str
+    display: ParticipantName
+    lastActivityTime: ParticipantTime
+    onlineUntilTime: ParticipantTime
+    entityId: int
+    role: ParticipantRole
+
+
+class NegotiationTopic(TypedDict):
+    topicId: int
+    vacancyId: int
+    resumeId: int
+    initialTopicType: str
+    currentTopicType: str
+    initialApplicantState: str
+    currentApplicantState: str
+
+
+class ChatDataResources(TypedDict):
+    vacancies: dict[str, Vacancy]
+    employers: dict[str, Any]
+    resumes: dict[str, ChatResume]
+    resumeHashById: dict[str, str]
+    participants: dict[str, ChatParticipant]
+    negotiation_topics: dict[str, NegotiationTopic]
+    addresses: dict[str, Any]
+    test_solutions: dict[str, Any]
+    file_info_by_upload_ids: dict[str, Any]
+    employer_assistant: dict[str, Any]
+
+
+class WriteMessageState(TypedDict):
+    allowed: bool
+    reasons: list[str]
+    reason: str | None
+
+
+class AllowedState(TypedDict):
+    allowed: bool
+
+
+class ChatStates(TypedDict):
+    writeMessageState: WriteMessageState
+    responseReminderState: AllowedState
+    sendFileState: AllowedState
+
+
+class SuggestionOptions(TypedDict):
+    options: list[Any]
+
+
+class Suggestions(TypedDict):
+    uuid: str
+    suggestionOptions: SuggestionOptions
+
+
+class ChatDataResponse(TypedDict):
+    chat: ChatDetails
+    resources: ChatDataResources
+    missingResources: dict[str, dict[str, Any]]
+    display: ChatDisplayInfo
+    chatStates: ChatStates
+    suggestions: Suggestions
+    hasMessagesWithTextButtons: bool
+    callAvailable: bool
+    negotiationTopicsAvailableStates: Any | None
 
 
 @dataclass
@@ -157,23 +438,8 @@ def _parse_dt(value: str) -> datetime:
         return parse_api_datetime(value)
 
 
-@contextmanager
-def reply_file(text: str) -> Generator[Path, None, None]:
-    """Временный файл для редактора, удаляется при выходе из контекста."""
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", prefix="hh-reply-", suffix=".txt", delete=False
-    ) as tmp:
-        tmp.write(text)
-        tmp_path = Path(tmp.name)
-
-    try:
-        yield tmp_path
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-
 class Operation(BaseOperation):
-    """Ответ работодателям в чатах (chatik)."""
+    """Автоответчик в чатах."""
 
     __aliases__: list[str] = ["respond-chats"]
 
@@ -212,19 +478,6 @@ class Operation(BaseOperation):
             action=argparse.BooleanOptionalAction,
         )
         parser.add_argument(
-            "-l",
-            "--loop-delay",
-            type=int,
-            help="Работать в цикле: после каждого прохода по чатам ждать N секунд и повторять. Без этого аргумента проход делается один раз. Требует AI",  # noqa: E501
-        )
-        parser.add_argument(
-            "-e",
-            "--editor",
-            choices=list(EDITORS),
-            default="vim",
-            help="Редактор для интерактивного режима (когда AI не используется)",  # noqa: E501
-        )
-        parser.add_argument(
             "--leave-discarded",
             help="Выходить из чатов с отказом. Без флага такие чаты остаются в списке",  # noqa: E501
             default=False,
@@ -234,14 +487,17 @@ class Operation(BaseOperation):
     # ---------------------------------------------------------------- run
 
     def run(self, tool: HHApplicantTool, args: Namespace) -> int | None:
+        if not tool.ai_enabled:
+            raise OperationError(
+                "Операция требует включенного и настроенного AI"
+            )
+
         self.tool = tool
         self.resume_id = args.resume_id
         self.max_pages = args.max_pages
         self.max_age = timedelta(hours=args.period) if args.period else None
         self.max_history = args.max_history
         self.dry_run = args.dry_run
-        self.loop_delay = args.loop_delay
-        self.editor = args.editor
         self.leave_discarded = args.leave_discarded
         self.ignored_chats: set[int] = set()
 
@@ -255,18 +511,10 @@ class Operation(BaseOperation):
         )
 
         # Используется AI — отвечает он, нет — открываем редактор
-        self.ai_args: dict[str, Any] | None = None
-        if tool.use_ai:
-            c = tool.get_openai_args("openai.reply_chat")
-            c.setdefault("system_prompt", DEFAULT_SYSTEM_PROMPT)
-            self.ai_args = c
-        else:
-            if self.loop_delay:
-                logger.error("Для работы в цикле нужен AI")
-                return 1
-            if not shutil.which(EDITORS[self.editor][0]):
-                logger.error("Редактор %s не найден", self.editor)
-                return 1
+
+        c = tool.get_openai_settings("openai.reply_chat")
+        c.setdefault("system_prompt", DEFAULT_SYSTEM_PROMPT)
+        self.ai_init_args = c
 
         self.user = tool.get_me()
         self.base_placeholders = {
@@ -276,29 +524,7 @@ class Operation(BaseOperation):
             "phone": self.user.get("phone") or "",
         }
 
-        return self.run_loop()
-
-    def run_loop(self) -> int:
-        while True:
-            try:
-                self.reply_chats()
-            except (BadResponse, requests.RequestException) as ex:
-                if not self.loop_delay:
-                    raise
-                # Обрыв соединения или 502 от hh: разовый сбой, трейсбек не
-                # нужен, следующая попытка через loop_delay
-                logger.error("Ошибка получения чатов: %s", ex)
-            except Exception:
-                if not self.loop_delay:
-                    raise
-                # Иначе любая ошибка останавливает автоответчик до рестарта
-                logger.exception("Ошибка при ответе в чатах")
-
-            if not self.loop_delay:
-                return 0
-
-            logger.debug("Следующий проход через %d с", self.loop_delay)
-            time.sleep(self.loop_delay)
+        return self.reply_chats()
 
     # ---------------------------------------------------------- chatik API
 
@@ -326,6 +552,10 @@ class Operation(BaseOperation):
     ) -> dict[str, str]:
         headers = {
             "Accept": "application/json",
+            "X-hhtmFrom": "resume_profile_front",
+            "X-hhtmFromLabel": "resume_profile_front",
+            "X-hhtmSource": "app",
+            "X-hhtmSourceLabel": "resume_profile_front",
             "X-Requested-With": "XMLHttpRequest",
             "X-Xsrftoken": self.tool.xsrf_token,
             **extra,
@@ -334,11 +564,20 @@ class Operation(BaseOperation):
             headers["Referer"] = refer_url
         return headers
 
+    def get_unread_count(self) -> UnreadCount:
+        """Количество непрочитанных чатов. Запрос без спецзаголовков."""
+        response = self.tool.session.get(f"{self.chat_url}/chatik/api/unread")
+        response.raise_for_status()
+        return response.json()
+
     def get_chats(
-        self, page: int, refer_url: str | None = None
-    ) -> dict[str, Any]:
+        self,
+        page: int,
+        refer_url: str | None = None,
+        unread: bool = False,
+    ) -> ChatsResponse:
         params: dict[str, Any] = {
-            "filterUnread": "false",
+            "filterUnread": "true" if unread else "false",
             "filterHasTextMessage": "false",
             "do_not_track_session_events": "true",
         }
@@ -353,23 +592,36 @@ class Operation(BaseOperation):
         response.raise_for_status()
         return response.json()
 
-    def get_chat_data(
-        self,
-        chat_id: int,
-        applicant_id: int,
-        refer_url: str | None = None,
-    ) -> dict[str, Any]:
+    def chat_referer(self, chat_id: int) -> str:
+        """Адрес страницы конкретного чата, он же Referer запросов к нему."""
+        return f"{self.chat_url}/chat/{chat_id}"
+
+    def get_chat_data(self, chat_id: int) -> ChatDataResponse:
         response = self.tool.session.get(
             f"{self.chat_url}/chatik/api/chat_data",
             params={
                 "chatId": chat_id,
-                "applicantId": applicant_id,
                 "do_not_track_session_events": "true",
             },
-            headers=self._headers(refer_url),
+            headers=self._headers(self.chat_referer(chat_id)),
         )
         response.raise_for_status()
         return response.json()
+
+    def mark_chat_read(self, chat_id: int, message_id: int) -> None:
+        response = self.tool.session.post(
+            f"{self.chat_url}/chatik/api/mark_read",
+            json={
+                "chatId": chat_id,
+                "messageId": message_id,
+                "hasUnreadDiscardMessage": False,
+            },
+            headers=self._headers(
+                self.chat_referer(chat_id),
+                **{"Content-Type": "application/json"},
+            ),
+        )
+        response.raise_for_status()
 
     def send_chat_message(
         self, chat_id: int, text: str, refer_url: str | None = None
@@ -379,6 +631,8 @@ class Operation(BaseOperation):
             json={
                 "chatId": chat_id,
                 "text": text,
+                # Я на самом деле не знаю, как это идентификатор на фронте
+                # генерируется
                 "idempotencyKey": str(uuid.uuid4()),
             },
             headers=self._headers(
@@ -396,14 +650,7 @@ class Operation(BaseOperation):
             f"{self.chat_url}/chatik/api/leave",
             json={"chatId": chat_id},
             headers=self._headers(
-                refer_url,
-                **{
-                    "Content-Type": "application/json",
-                    "X-hhtmFrom": "resume",
-                    "X-hhtmFromLabel": "resume",
-                    "X-hhtmSource": "app",
-                    "X-hhtmSourceLabel": "resume",
-                },
+                refer_url, **{"Content-Type": "application/json"}
             ),
         )
         response.raise_for_status()
@@ -464,7 +711,7 @@ class Operation(BaseOperation):
 
     @staticmethod
     def format_history_lines(
-        chat_data: dict[str, Any],
+        chat_data: ChatDataResponse,
     ) -> tuple[list[str], int]:
         """Возвращает сообщения чата по одному и их общее число."""
         chat = chat_data.get("chat") or {}
@@ -491,7 +738,8 @@ class Operation(BaseOperation):
 
     @staticmethod
     def trim_history(
-        lines: list[str], tail: int = EDITOR_HISTORY_TAIL
+        lines: list[str],
+        tail: int = 10,
     ) -> list[str]:
         """Оставляет первое сообщение и последние `tail`.
 
@@ -510,7 +758,7 @@ class Operation(BaseOperation):
 
     # --------------------------------------------------- collecting chats
 
-    def is_stale(self, item: dict[str, Any]) -> bool:
+    def is_stale(self, item: ChatItem) -> bool:
         last = item.get("lastMessage")
         if not self.max_age or not last or not last.get("creationTime"):
             return False
@@ -519,7 +767,7 @@ class Operation(BaseOperation):
 
     def parse_chat_item(
         self,
-        item: dict[str, Any],
+        item: ChatItem,
         resume: dict[str, Any],
         applicant_id: int,
         resources: dict[str, Any],
@@ -600,7 +848,9 @@ class Operation(BaseOperation):
         result: list[ChatToReply] = []
 
         for page in range(max_pages):
-            data = self.get_chats(page, refer_url=self.chat_page_url)
+            data = self.get_chats(
+                page, refer_url=self.chat_page_url, unread=True
+            )
             chats = data.get("chats") or {}
             items = chats.get("items") or []
             if not items:
@@ -611,11 +861,11 @@ class Operation(BaseOperation):
             chat_resumes = resources.get("resumes") or {}
 
             for item in items:
-                if self.is_stale(item):
-                    if item.get("pinned"):
-                        continue
-                    # Чаты отсортированы по активности, дальше только старее
-                    return result
+                # Я не знаю что pinned=true значит
+                # if self.is_stale(item):
+                #     if item.get("pinned"):
+                #         continue
+                #     return result
 
                 if item["id"] in self.ignored_chats:
                     continue
@@ -702,6 +952,9 @@ class Operation(BaseOperation):
         """Один проход по чатам."""
         blacklist = set(self.tool.get_blacklisted())
 
+        cnt = self.get_unread_count()
+        logger.debug("Счетчик непрочитанных: %d", cnt["unreadCount"])
+
         chats = self.get_chats_awaiting_reply(self.max_pages)
         logger.debug("Чатов для ответа: %d", len(chats))
         if not chats:
@@ -719,9 +972,10 @@ class Operation(BaseOperation):
 
     def load_history(self, chat: ChatToReply) -> tuple[list[str], int, bool]:
         """Возвращает сообщения чата, их число и можно ли писать в чат."""
-        chat_data = self.get_chat_data(
-            chat.chat_id, chat.applicant_id, refer_url=self.chat_page_url
-        )
+        chat_data = self.get_chat_data(chat.chat_id)
+        if not self.dry_run:
+            last_message = chat_data["chat"]["messages"]["items"][-1]
+            self.mark_chat_read(chat.chat_id, last_message["id"])
         state = (chat_data.get("chatStates") or {}).get(
             "writeMessageState"
         ) or {}
@@ -745,54 +999,41 @@ class Operation(BaseOperation):
 
         send_message = ""
 
-        if self.ai_args is not None:
-            placeholders = self.build_placeholders(chat)
+        placeholders = self.build_placeholders(chat)
 
-            if chat.reply_options:
-                template = self.options_prompt
-            else:
-                template = self.user_prompt
-                lines, count, writable = self.load_history(chat)
-                if not writable or count >= self.max_history:
-                    logger.debug("Игнорируем чат #%s", chat.chat_id)
-                    self.ignored_chats.add(chat.chat_id)
-                    return
-                placeholders = self.build_placeholders(
-                    chat, "\n---\n".join(lines), count
-                )
-
-            cfg = dict(self.ai_args)
-            cfg["system_prompt"] = render_template(
-                cfg["system_prompt"], placeholders, randomize_text=False
-            )
-            ai = self.tool.get_ai_client(**cfg)
-            send_message = ai.complete(
-                render_template(template, placeholders, randomize_text=False)
-            ).strip()
-            logger.debug(f"AI message: {send_message}")
-
-            if chat.reply_options:
-                option = self.match_option(send_message, chat.reply_options)
-                if option is None:
-                    logger.warning(
-                        "AI вернул не вариант ответа в чате %s: %r",
-                        chat.chat_id,
-                        send_message,
-                    )
-                    return
-                send_message = option
+        if chat.reply_options:
+            template = self.options_prompt
         else:
-            lines, _, writable = self.load_history(chat)
-            if not writable:
+            template = self.user_prompt
+            lines, count, writable = self.load_history(chat)
+            if not writable or count >= self.max_history:
                 logger.debug("Игнорируем чат #%s", chat.chat_id)
                 self.ignored_chats.add(chat.chat_id)
                 return
-            answer = self.ask_interactively(
-                chat, self.trim_history(lines), blacklist
+            placeholders = self.build_placeholders(
+                chat, "\n---\n".join(lines), count
             )
-            if answer is None:
+
+        cfg = dict(self.ai_init_args)
+        cfg["system_prompt"] = render_template(
+            cfg["system_prompt"], placeholders, randomize_text=False
+        )
+        ai = self.tool.get_ai_client(**cfg)
+        send_message = ai.complete(
+            render_template(template, placeholders, randomize_text=False)
+        ).strip()
+        logger.debug(f"AI message: {send_message}")
+
+        if chat.reply_options:
+            option = self.match_option(send_message, chat.reply_options)
+            if option is None:
+                logger.warning(
+                    "AI вернул не вариант ответа в чате %s: %r",
+                    chat.chat_id,
+                    send_message,
+                )
                 return
-            send_message = answer
+            send_message = option
 
         if not send_message.strip():
             logger.warning("Пустой ответ для чата %s", chat.chat_id)
@@ -810,79 +1051,3 @@ class Operation(BaseOperation):
 
         print(f"📨 Отправлено для {chat.vacancy_url}")
         time.sleep(random.uniform(1, 3))
-
-    # --------------------------------------------------- interactive mode
-
-    @staticmethod
-    def build_editor_text(chat: ChatToReply, history: list[str]) -> str:
-        header = [f"{chat.employer_name} — {chat.vacancy_name}"]
-        if chat.vacancy_compensation:
-            header.append(f"Зарплата: {chat.vacancy_compensation}")
-        header.append(f"Резюме: {chat.resume_title}")
-
-        messages = "\n---\n".join(history) or chat.reply_to_message.strip()
-        parts = ["\n".join(header), "Последние сообщения:\n\n" + messages]
-
-        if chat.reply_options:
-            options = "\n".join(f"- {o}" for o in chat.reply_options)
-            parts.append("Варианты ответа:\n" + options)
-
-        parts.append(
-            "# Напишите ответ, сохраните файл и выйдите из редактора с помощью `:wq`.\n"
-            "# Всё, что выше разделителя, игнорируется. Разделитель не "
-            "удаляйте.\n"
-            "# Пустой ответ — пропустить чат. /ban — заблокировать "
-            "работодателя, /leave — выйти из чата."
-        )
-
-        # Пустая строка в конце нужна, чтобы курсор встал под разделителем,
-        # а не в его конец
-        return "\n\n".join(parts) + f"\n\n{REPLY_SEPARATOR}\n\n"
-
-    @staticmethod
-    def parse_editor_answer(text: str) -> str | None:
-        """Текст после разделителя или None, если разделитель удалён."""
-        if REPLY_SEPARATOR not in text:
-            return None
-        return text.rpartition(REPLY_SEPARATOR)[2].strip()
-
-    def ask_interactively(
-        self, chat: ChatToReply, history: list[str], blacklist: set[str]
-    ) -> str | None:
-        """Возвращает текст ответа или None, если чат нужно пропустить."""
-        print("Отвечаем:", chat.employer_name, "|", chat.vacancy_name)
-        with reply_file(self.build_editor_text(chat, history)) as path:
-            result = subprocess.run([*EDITORS[self.editor], str(path)])
-
-            if result.returncode != 0:
-                logger.warning(
-                    "Редактор завершился с кодом %s, пропускаем чат",
-                    result.returncode,
-                )
-                return None
-
-            edited = path.read_text(encoding="utf-8")
-
-        answer = self.parse_editor_answer(edited)
-        if not answer:
-            print("🚶 Пропускаем чат")
-            return None
-
-        command = answer.split(maxsplit=1)[0]
-        if command == "/ban":
-            if chat.employer_id and not self.dry_run:
-                self.tool.api_client.put(
-                    f"/employers/blacklisted/{chat.employer_id}"
-                )
-                blacklist.add(chat.employer_id)
-            print("🚫 Работодатель заблокирован", chat.employer_name)
-            return None
-
-        if command == "/leave":
-            if not self.dry_run:
-                self.leave_chat(chat.chat_id, refer_url=self.chat_page_url)
-            self.ignored_chats.add(chat.chat_id)
-            print("❌ Выход из чата", chat.vacancy_url)
-            return None
-
-        return answer

@@ -73,11 +73,9 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-# Содержимое config кроме .gitkeep игнорируется
+# Содержимое config кроме .gitkeep игнорируется: там токены и ключ API
 /config/*
 !/config/.gitkeep
-
-Session.vim
 
 # AI assistants / IDE agents
 .claude/
@@ -85,15 +83,10 @@ CLAUDE.md
 .serena/
 .codex/
 .vscode/
-uv.lock
 poetry.lock
 
 # Мой мусор
-test_captcha.py
-direct_login.py
+# Результаты декомпиляции приложения
 out/
-*.apks
 jadx_out/
-hars/
-captcha.md
-*.json
+*.har

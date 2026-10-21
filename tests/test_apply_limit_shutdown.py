@@ -35,17 +35,13 @@ def _make_operation(max_responses: int = 5) -> Operation:
     op.cover_letter_ai = None
     op.excluded_pat = None
     op.cover_letter = "hello"
-    op.force_letter = False
+    op.force_cover_letter = False
     op.send_email = False
     op.skip_tests = False
 
-    # Mocked tool with a storage that no-ops saves
     tool = MagicMock()
-    tool.storage.vacancies.save.return_value = None
-    tool.storage.vacancy_contacts.save.return_value = None
-    tool.storage.employers.save.return_value = None
-    tool.storage.skipped_vacancies.find.return_value = []
-    tool.storage.negotiations.save.return_value = None
+    tool.general_config = {}
+    tool.get_resume_placeholders.return_value = {}
     op.tool = tool
 
     # Each post returns empty dict -> assert res == {} passes, applied_count++.

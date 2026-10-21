@@ -1,7 +1,7 @@
 """Наследование параметров в конфиге [openai.*].
 
 С 2.1.0 общие параметры лежат в [openai.default], а секции вроде
-[openai.chat] их переопределяют. В ChatOpenAI уходят только известные ему
+[openai.chat] их переопределяют. В OpenAIClient уходят только известные ему
 аргументы, и ключ API в их числе: без него клиента не создать.
 """
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import tomli_w
 
-from hh_applicant_tool.ai.openai import ChatOpenAI
+from hh_applicant_tool.ai.openai import OpenAIClient
 from hh_applicant_tool.tool import HHApplicantTool
 
 CONFIG = {
@@ -50,8 +50,8 @@ def test_section_overrides_default_params(tmp_path: Path) -> None:
 
 
 def test_settings_build_client(tmp_path: Path) -> None:
-    """В 2.1.0 ключ отфильтровывался, и ChatOpenAI падал с TypeError."""
-    client = ChatOpenAI(**_tool(tmp_path).get_openai_settings("openai.chat"))
+    """В 2.1.0 ключ отфильтровывался, и OpenAIClient падал с TypeError."""
+    client = OpenAIClient(**_tool(tmp_path).get_openai_settings("openai.chat"))
 
     assert client.api_key == "k"
     assert client.model == "chat"

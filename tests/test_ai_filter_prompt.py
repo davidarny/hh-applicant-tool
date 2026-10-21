@@ -3,7 +3,7 @@
 С 2.2 промпты задаются только в конфиге: системные - в секциях
 [openai.cover_letter] и [openai.vacancy_filter], шаблоны с %(name)s - в
 [general]. В 2.2 фильтр получал опечатку system_propmt, на которой
-ChatOpenAI падал с TypeError.
+OpenAIClient падал с TypeError.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 from argparse import ArgumentParser
 from unittest.mock import MagicMock
 
-from hh_applicant_tool.ai.openai import ChatOpenAI
+from hh_applicant_tool.ai.openai import OpenAIClient
 from hh_applicant_tool.operations.apply_vacancies import (
     DEFAULT_AI_FILTER_SYSTEM_PROMPT,
     DEFAULT_COVER_LETTER_SYSTEM_PROMPT,
@@ -25,7 +25,7 @@ def _run(
     general: dict | None = None,
     sections: dict[str, dict] | None = None,
 ) -> dict:
-    """Запускает run() с --ai-filter и настоящим ChatOpenAI, без рассылки."""
+    """Запускает run() с --ai-filter и настоящим OpenAIClient, без рассылки."""
     op = Operation()
     parser = ArgumentParser()
     op.setup_parser(parser)
@@ -40,7 +40,7 @@ def _run(
         "model": section,
         **(sections or {}).get(section, {}),
     }
-    tool.get_ai_client.side_effect = lambda **kw: ChatOpenAI(**kw)
+    tool.get_ai_client.side_effect = lambda **kw: OpenAIClient(**kw)
     op._apply_vacancies = MagicMock()  # type: ignore[method-assign]
 
     op.run(tool, args)
@@ -88,13 +88,15 @@ def test_default_prompt_templates_without_config() -> None:
     op = _run()["op"]
 
     assert "%(vacancy_name)s" in op.cover_letter_prompt
-    assert "%(vacancy_description)s" in op.ai_filter_prompt
+    # С 2.4 описание в шаблоне обрезается: %(vacancy_description).2000s
+    assert "%(vacancy_description)" in op.ai_filter_prompt
 
 
 def test_filter_prompt_has_vacancy_description_and_skills() -> None:
     """Шаблон фильтра получает описание и ключевые навыки вакансии."""
     op = _make_operation()
-    op.ai_filter_prompt = "%(vacancy_name)s | %(vacancy_key_skills)s | %(vacancy_description)s"
+    # С 2.4 плейсхолдер навыков вакансии называется vacancy_skills
+    op.ai_filter_prompt = "%(vacancy_name)s | %(vacancy_skills)s | %(vacancy_description)s"
     op.tool.api_client.get.return_value = {
         "description": "<p>React и TypeScript</p>",
         "key_skills": [{"name": "React"}, {"name": "TypeScript"}],
@@ -114,7 +116,7 @@ def test_filter_prompt_has_vacancy_description_and_skills() -> None:
 def test_filter_client_sends_system_prompt_in_openai_payload() -> None:
     """Scenario: the filter prompt is present in the outbound AI request.
 
-    Given a ChatOpenAI client configured with a filter system prompt
+    Given a OpenAIClient client configured with a filter system prompt
     When it completes a vacancy suitability request
     Then the outbound messages contain that prompt as the system message
     """
@@ -122,7 +124,7 @@ def test_filter_client_sends_system_prompt_in_openai_payload() -> None:
     response = session.post.return_value
     response.status_code = 200
     response.json.return_value = {"choices": [{"message": {"content": "true"}}]}
-    client = ChatOpenAI(
+    client = OpenAIClient(
         api_key="test-key",
         base_url="https://example.test/v1",
         model="test-model",

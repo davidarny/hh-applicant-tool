@@ -20,9 +20,14 @@ __all__ = ("ApiClient", "OAuthClient")
 HH_API_URL = "https://api.hh.ru"
 HH_OAUTH_URL = "https://hh.ru/oauth/"
 DEFAULT_DELAY = 0.345
-DEFAULT_CAPTCHA_COOLDOWN = 5.0
+# После того как я отправил ожидание перед отправкой текста капчи на сервер,
+# если она не была введена вручную, эта настройка ни на что не влияет,
+# она разве что симулирует задержку перед редиректом через JS, когда капча
+# была успешно решена
+DEFAULT_CAPTCHA_COOLDOWN = 0.0
 MAX_RETRIES = 3
-MAX_CAPTCHA_RETRIES = 5
+# Это, считай, костыль ради хуии, потому как тот может бесконечно херню вместо распознанного текста слать
+MAX_CAPTCHA_ATTEMPTS = 5
 
 AllowedMethods = Literal[
     "GET",
@@ -37,7 +42,7 @@ AllowedMethods = Literal[
 
 T = TypeVar("T")
 
-logger = logging.getLogger("hh-applicant-tool")
+logger = logging.getLogger(__name__.split(".")[0])
 
 
 # Thread-safe
@@ -105,10 +110,11 @@ class BaseClient:
         params.update(kwargs)
         url = self.resolve_url(endpoint)
 
-        if method in ("POST", "PUT"):
-            payload = {"json" if as_json else "data": params}
-        else:
-            payload = {"params": params}
+        params_key = (
+            ("json" if as_json else "data")
+            if method in ("POST", "PUT")
+            else "params"
+        )
 
         last_exc: Exception | None = None
 
@@ -116,11 +122,8 @@ class BaseClient:
             with self._lock:
                 self._wait_for_delay(delay)
 
-                def kv(d: dict) -> str:
-                    return "; ".join(f"{k}={v!r}" for k, v in d.items())
-
                 logger.debug(
-                    f"({attempt}/{self.max_retries}) {method} {url} {kv(payload)}",
+                    f"({attempt}/{self.max_retries}) {method} {url} {params_key}={params!r}",
                 )
 
                 try:
@@ -132,7 +135,7 @@ class BaseClient:
                         headers=self._default_headers(),
                         proxies=get_proxies_dict(self.proxy_url),
                         allow_redirects=False,
-                        **payload,
+                        **{params_key: params},
                     )
                 except requests.ConnectionError as ex:
                     logger.warning(
@@ -267,7 +270,7 @@ class ApiClient(BaseClient):
             self.captcha_cooldown or DEFAULT_CAPTCHA_COOLDOWN
         )
         self.max_captcha_attempts = (
-            self.max_captcha_attempts or MAX_CAPTCHA_RETRIES
+            self.max_captcha_attempts or MAX_CAPTCHA_ATTEMPTS
         )
         return super().__post_init__()
 
@@ -305,8 +308,8 @@ class ApiClient(BaseClient):
         delay=None,
         as_json=False,
         *,
-        captcha_cooldown=None,
-        max_captcha_attempts=None,
+        captcha_cooldown: float | None = None,
+        max_captcha_attempts: int | None = None,
         **kwargs,
     ):
         captcha_cooldown = captcha_cooldown or self.captcha_cooldown
@@ -339,8 +342,11 @@ class ApiClient(BaseClient):
                             break
                         attempts -= 1
                     if accepted:
-                        logger.debug(f"captcha cooldown: {captcha_cooldown}")
-                        time.sleep(captcha_cooldown)
+                        if self.captcha_cooldown > 0:
+                            logger.debug(
+                                f"captcha cooldown: {captcha_cooldown}"
+                            )
+                            time.sleep(captcha_cooldown)
                         continue
                 raise
             except errors.Forbidden:
@@ -368,9 +374,9 @@ class ApiClient(BaseClient):
             self.on_token_change(self.get_access_token())
 
     def handle_access_token(self, token: AccessToken) -> None:
-        for name in ("access_token", "refresh_token", "access_expires_at"):
-            if name in token and hasattr(self, name):
-                setattr(self, name, token[name])
+        for k, v in token.items():
+            if k in ["access_token", "refresh_token", "access_expires_at"]:
+                setattr(self, k, v)
         if self.on_token_change:
             self.on_token_change(self.get_access_token())
 

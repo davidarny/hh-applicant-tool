@@ -90,3 +90,4 @@ poetry.lock
 out/
 jadx_out/
 *.har
+models/

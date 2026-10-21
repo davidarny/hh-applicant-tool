@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import html
 import json
 import logging
+import random
 import signal
 import smtplib
 import sys
+import time
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import KW_ONLY, dataclass
@@ -15,46 +18,88 @@ from functools import cached_property
 from http.cookiejar import MozillaCookieJar
 from importlib import import_module
 from itertools import count
+from json.decoder import JSONDecodeError
 from os import getenv
 from pathlib import Path
 from pkgutil import iter_modules
-from typing import Any, Callable, Iterable, Literal, NamedTuple, TypedDict
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Literal,
+    NamedTuple,
+    NotRequired,
+    TypedDict,
+)
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
 
 import requests
 
-from hh_applicant_tool.utils.package import PACKAGE_NAME
+from hh_applicant_tool.utils.package import PACKAGE_NAME, get_package_version
 
 from . import ai, api
 from .constants import (
-    ACCEPT_LANGUAGE,
+    ACCEPT_HEADER,
+    ACCEPT_LANGUAGE_HEADER,
     ANDROID_CLIENT_ID,
     ANDROID_CLIENT_SECRET,
     ANDROID_WEBVIEW_USERAGENT,
+    CAPTCHA_MAX_SOLVE_DELAY,
+    CAPTCHA_MIN_SOLVE_DELAY,
+    CAPTCHA_PROMPT,
     CAPTCHA_SUCCESS_BACKURL,
     CONFIG_DIR,
     CONFIG_FILENAME,
     COOKIES_FILENAME,
     DEFAULT_CAPTCHA_LANGUAGE,
     DEFAULT_DESKTOP_USERAGENT,
+    GITHUB_REPO_URL,
     HH_BASE_URL,
     HH_DOMAIN_RE,
     LOG_FILENAME,
-    REPO_URL,
+    MAX_CAPTCHA_ATTEMPTS,
+    TELEGRAM_CHAT_URL,
     TOKEN_CONFIG_FILENAME,
 )
-from .errors import Error, OperationCanceled, OperationError
+from .errors import (
+    CaptchaError,
+    Error,
+    OperationCanceled,
+    OperationError,
+)
 from .utils.argparse import ArgumentFormatter
 from .utils.config import ConfigJSON, ConfigTOML
+from .utils.datatypes import ResumePlaceholders
 from .utils.helpers import get_proxies_dict
 from .utils.log import setup_logger
+from .utils.string import shorten
 from .utils.system import has_gui_support, is_docker
 from .utils.term import print_kitty_image, print_sixel_image, setup_terminal
 from .utils.user_agent import generate_android_useragent
 
-logger = logging.getLogger("hh-applicant-tool")
+try:
+    import tkinter as tk
+    from tkinter import ttk
+
+    TKINTER_IMPORTED = True
+except ImportError:
+    TKINTER_IMPORTED = False
+
+
+logger = logging.getLogger(__name__.split(".")[0])
 
 OPERATIONS = "operations"
+
+_CAPTCHA_HEADERS = {"X-Hhtmfrom": "", "X-Hhtmsource": "account_captcha"}
+
+
+class XHRResult(TypedDict):
+    http_status: int
+    http_headers: dict[str, str]
+    text: NotRequired[str]
+    success: NotRequired[bool]
+    hhcaptcha: NotRequired[dict[str, str]]
+    ...
 
 
 class HHLuxInitialState(TypedDict):
@@ -102,21 +147,23 @@ class BaseNamespace(argparse.Namespace):
     use_kitty: bool
     use_sixel: bool
     captcha_lang: Literal["RU", "EN"]
+    captcha_handling: bool
 
 
 @dataclass
 class HHApplicantTool:
     """Утилита для автоматизации действий соискателя на сайте hh.ru.
 
-    Исходники и предложения: <https://github.com/s3rgeym/hh-applicant-tool>
+    Исходники и предложения: <{repo_url}>
 
-    Группа поддержки: <https://t.me/s3rgeym_chat>
-    """
+    Группа поддержки: <{tg_url}>
+    """.format(repo_url=GITHUB_REPO_URL, tg_url=TELEGRAM_CHAT_URL)
 
     _: KW_ONLY
     api_delay: float | None = None
     base_url: str | None = None
     captcha_manual: bool = False
+    captcha_handling: bool = True
     captcha_lang: str | None = None
     config_dir: Path | None = None
     openai_connect_timeout: float | None = None
@@ -225,12 +272,20 @@ class HHApplicantTool:
         )
         parser.add_argument(
             "--captcha-lang",
-            choices=["RU", "EN"],
+            choices=["RU", "EN", "ru", "en"],
             help="Язык капчи. Некоторые модели распознают лучше текст на английском",
         )
         parser.add_argument(
-            "--captcha-manual",
+            "--handle-captcha",
+            dest="captcha_handling",
+            help="Добавлять перехватчик ошибок капчи при вызове API",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+        )
+        parser.add_argument(
+            "--manual-captcha",
             "--manual",
+            dest="captcha_manual",
             help="Ручной ввод капчи. Полезен, если модель не поддерживает vision",
             action="store_true",
             default=False,
@@ -284,19 +339,19 @@ class HHApplicantTool:
             proxies = get_proxies_dict(self.proxy_url)
 
         if proxies:
-            logger.debug("session proxies: %r", proxies)
+            logger.debug("Session proxies: %r", proxies)
             session.proxies = proxies
 
         # В заголовки не лезь, если не понимаешь зачем они
         session.headers.update(
             {
                 "User-Agent": user_agent or self.user_agent,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": ACCEPT_LANGUAGE,
+                "Accept": ACCEPT_HEADER,
+                "Accept-Language": ACCEPT_LANGUAGE_HEADER,
             }
         )
 
-        logger.debug("session headers: %r", session.headers)
+        logger.debug("Session headers: %r", session.headers)
 
         return session
 
@@ -329,7 +384,7 @@ class HHApplicantTool:
         session = requests.Session()
         session.headers.update(
             {
-                "User-Agent": f"{PACKAGE_NAME} (+{REPO_URL})",
+                "User-Agent": f"Mozilla/5.0 (compatible; {PACKAGE_NAME}/{get_package_version()}; +{GITHUB_REPO_URL})",
             }
         )
         logger.debug("AI Default Headers: %r", session.headers)
@@ -398,7 +453,10 @@ class HHApplicantTool:
             client_id=ANDROID_CLIENT_ID,
             client_secret=ANDROID_CLIENT_SECRET,
             user_agent=generate_android_useragent(),
-            captcha_handler=self.handle_captcha,
+            captcha_handler=self.handle_captcha
+            if self.captcha_handling
+            else None,
+            max_captcha_attempts=MAX_CAPTCHA_ATTEMPTS,
             on_token_change=self._save_token,
             **client_config,
         )
@@ -409,9 +467,9 @@ class HHApplicantTool:
         self,
         system_prompt: str | None = None,
         **kwargs,
-    ) -> ai.ChatOpenAI:
+    ) -> ai.OpenAIClient:
         kwargs.setdefault("session", self.ai_session)
-        return ai.ChatOpenAI(system_prompt=system_prompt, **kwargs)
+        return ai.OpenAIClient(system_prompt=system_prompt, **kwargs)
 
     def get_openai_config(self, section: str | None = None) -> dict:
         """Возвращает копию конфига openai с учетом наследования от главной"""
@@ -450,7 +508,8 @@ class HHApplicantTool:
 
         required("base_url")
         # required("api_key")
-        required("model")
+        # Для llama.cpp это поле не является обязательным
+        # required("model")
 
         if self.openai_delay:
             c.setdefault("delay", self.openai_delay)
@@ -484,7 +543,7 @@ class HHApplicantTool:
             ]
         }
 
-    def _get_captcha_ai(self) -> ai.ChatOpenAI:
+    def _get_captcha_ai(self) -> ai.OpenAIClient:
         c = self.get_openai_settings("openai.captcha")
         c.setdefault(
             "system_prompt",
@@ -607,10 +666,7 @@ class HHApplicantTool:
             return
 
         jar = MozillaCookieJar(str(self.cookies_file))
-        for c in self.session.cookies:
-            if c.domain and not HH_DOMAIN_RE.search(c.domain):
-                continue
-
+        for c in cookies:
             jar.set_cookie(copy.copy(c))
 
         jar.save(ignore_discard=True, ignore_expires=True)
@@ -651,16 +707,25 @@ class HHApplicantTool:
 
     def _solve_captcha(self, image_data: bytes) -> str:
         if self.ai_enabled and not self.captcha_manual:
+            logger.debug("Try recognize CAPTCHA text via AI")
             return self.captcha_ai.recognize_text(image_data)
 
-        if not has_gui_support() or self.use_kitty or self.use_sixel:
-            if self.use_kitty:
-                print_kitty_image(image_data)
-            else:
-                print_sixel_image(image_data)
-            return input("\nВведите текст с картинки выше: ").strip()
+        if self._can_use_tkinter():
+            return self.prompt_captcha_tkinter(image_data)
 
-        return self.prompt_captcha_tk(image_data)
+        return self._prompt_captcha_in_terminal(image_data)
+
+    def _can_use_tkinter(self) -> bool:
+        return (
+            TKINTER_IMPORTED
+            and not (self.use_kitty or self.use_sixel)
+            and has_gui_support()
+        )
+
+    def _prompt_captcha_in_terminal(self, image_data: bytes) -> str:
+        show_image = print_kitty_image if self.use_kitty else print_sixel_image
+        show_image(image_data)
+        return input(CAPTCHA_PROMPT).strip()
 
     def solve_captcha(
         self,
@@ -680,12 +745,17 @@ class HHApplicantTool:
             session=session,
         )
         text = self._solve_captcha(image_data=captcha_img.data)
+        logger.debug(f"Текст с капчи: {text}")
 
         return CaptchaSolution(
             text=text,
             state=captcha_state,
             key=captcha_img.key,
         )
+
+    @cached_property
+    def webview_session(self) -> requests.Session:
+        return self._create_session(user_agent=ANDROID_WEBVIEW_USERAGENT)
 
     def handle_captcha(
         self,
@@ -713,8 +783,9 @@ class HHApplicantTool:
         """
         logger.debug("captcha url: %s", captcha_url)
 
-        # Создадим новую пустую сессию для прохождения капчи
-        session = self._create_session(user_agent=ANDROID_WEBVIEW_USERAGENT)
+        # На Андроиде WebView сохраняет куки между вызовами, поэтому будем
+        # симулировать это поведение
+        session = self.webview_session
 
         r = session.get(
             captcha_url,
@@ -741,6 +812,8 @@ class HHApplicantTool:
         if not xsrf_token:
             raise ValueError("xsrf token отсутствует в Cookies!")
 
+        dt = -time.monotonic()
+
         solution = self.solve_captcha(
             captcha_state=state,
             lang=lang,
@@ -748,6 +821,20 @@ class HHApplicantTool:
             xsrf_token=xsrf_token,
             session=session,
         )
+
+        dt += time.monotonic()
+
+        logger.debug("Время затраченное на решение капчи: %.2f сек", dt)
+
+        required_delay = random.uniform(
+            CAPTCHA_MIN_SOLVE_DELAY, CAPTCHA_MAX_SOLVE_DELAY
+        )
+
+        if (wait := required_delay - dt) > 0:
+            logger.info(
+                f"Ждем {wait:.2f} сек перед отправкой капчи на проверку",
+            )
+            time.sleep(wait)
 
         return self._send_captcha(
             text=solution.text,
@@ -759,6 +846,182 @@ class HHApplicantTool:
             session=session,
         )
 
+    # --- Сборка запроса -----------------------------------------------------
+    @staticmethod
+    def _build_xhr_headers(
+        origin: str,
+        xsrf: str,
+        referer_url: str,
+        extra_headers: dict,
+    ) -> dict:
+        """Стандартные XHR-заголовки; `extra_headers` перекрывает стандартные.
+
+        Все значения уже определены и не None -- проверки делает вызывающий код.
+        """
+        return {
+            "Accept": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-XSRFToken": xsrf,
+            "Origin": origin,
+            "Referer": referer_url,
+            **extra_headers,
+        }
+
+    @staticmethod
+    def _parse_xhr_response(r: requests.Response) -> XHRResult:
+        """Разбирает ответ в словарь и проверяет, не требует ли сервер капчу.
+
+        - не JSON      -> {"text": ..., "http_status": ...}
+        - JSON не dict -> {"data": ..., "http_status": ...}
+        - в остальных случаях к словарю ответа добавляется "http_status".
+
+        Бросает CaptchaError, если в ответе есть hhcaptcha.captchaState
+        (такое бывает и при 200, и при 403).
+        """
+        try:
+            res = r.json()
+        except JSONDecodeError:
+            return {"text": r.text, "http_status": r.status_code}
+
+        if not isinstance(res, dict):
+            # Их говноапи может и список вернуть и null
+            res = {"data": res}
+
+        if captcha_state := (res.get("hhcaptcha") or {}).get("captchaState"):
+            raise CaptchaError(captcha_state)
+
+        # В res["recaptcha"]["key"] всегда лежит ключ, но не ясно, что еще должно быть, чтобы ошибку рекапчи бросить...
+
+        res.setdefault("http_status", r.status_code)
+        return res
+
+    @staticmethod
+    def _with_captcha(
+        json: dict | None,
+        data: dict | None,
+        captcha: dict,
+    ) -> tuple[dict | None, dict | None]:
+        """Подмешивает поля капчи в json (если он есть) или в form-data."""
+        if json is not None:
+            return {**json, **captcha}, data
+        return json, {**(data or {}), **captcha}
+
+    # --- Запросы ------------------------------------------------------------
+
+    def _xhr_request(
+        self,
+        method: str,
+        endpoint: str,
+        params: dict | None = None,
+        data: dict | None = None,
+        json: dict | None = None,
+        referer_url: str | None = None,
+        headers: dict | None = None,
+        xsrf_token: str | None = None,
+        session: requests.Session | None = None,
+    ) -> XHRResult:
+        """Одна попытка XHR-запроса к внутреннему API hh.ru (без решения капчи).
+
+        endpoint     -- путь ("/shards/...") или полный URL (например, chatik.hh.ru).
+        params       -- query string (и для GET, и для POST/PUT).
+        data         -- тело запроса (form-data).
+        json         -- тело запроса (JSON).
+        referer_url  -- страница, с которой "сделан" запрос. Если не передан,
+                        берётся главная того же хоста.
+        headers      -- дополнительные заголовки; перекрывают стандартные.
+        xsrf_token   -- если не передан, берётся из куки _xsrf сессии.
+
+        Статус ответа НЕ проверяется: код возвращается в поле "http_status".
+        Бросает CaptchaError, если сервер потребовал капчу, и ValueError,
+        если нет токена _xsrf.
+        """
+        session = session or self.session
+        url = urljoin(self.base_url, endpoint)
+
+        parts = urlsplit(url)
+        origin = f"{parts.scheme}://{parts.netloc}"
+
+        xsrf = xsrf_token or session.cookies.get("_xsrf")
+        if not xsrf:
+            raise ValueError("Нет куки _xsrf: сначала авторизуйтесь")
+
+        request_headers = self._build_xhr_headers(
+            origin=origin,
+            xsrf=xsrf,
+            referer_url=referer_url or f"{origin}/",
+            extra_headers=headers or {},
+        )
+
+        r = session.request(
+            method.upper(),
+            url,
+            params=params,
+            data=data,
+            json=json,
+            headers=request_headers,
+            allow_redirects=False,
+            timeout=(10, 30),
+        )
+        return self._parse_xhr_response(r)
+
+    def xhr_request(
+        self,
+        method: str,
+        endpoint: str,
+        params: dict | None = None,
+        data: dict | None = None,
+        json: dict | None = None,
+        referer_url: str | None = None,
+        headers: dict | None = None,
+        xsrf_token: str | None = None,
+        session: requests.Session | None = None,
+    ) -> XHRResult:
+        """XHR-запрос с автоматическим решением капчи.
+
+        Параметры те же, что у `_xhr_request`. При CaptchaError решает капчу
+        и повторяет запрос, но не более MAX_CAPTCHA_ATTEMPTS раз.
+        """
+        for attempt in range(MAX_CAPTCHA_ATTEMPTS + 1):
+            try:
+                return self._xhr_request(
+                    method,
+                    endpoint,
+                    params=params,
+                    data=data,
+                    json=json,
+                    referer_url=referer_url,
+                    headers=headers,
+                    xsrf_token=xsrf_token,
+                    session=session,
+                )
+            except CaptchaError as ex:
+                if attempt >= MAX_CAPTCHA_ATTEMPTS:
+                    raise
+
+                logger.debug(
+                    "(%d/%d) Требуется ввод капчи: %s %s",
+                    attempt + 1,
+                    MAX_CAPTCHA_ATTEMPTS,
+                    method,
+                    endpoint,
+                )
+
+                solution = self.solve_captcha(
+                    captcha_state=ex.state,
+                    referer_url=referer_url,
+                )
+                json, data = self._with_captcha(
+                    json,
+                    data,
+                    {
+                        "captchaState": ex.state,
+                        "captchaText": solution.text,
+                        "captchaKey": solution.key,
+                    },
+                )
+
+        raise AssertionError("unreachable")
+
     def get_captcha_image(
         self,
         *,
@@ -767,37 +1030,23 @@ class HHApplicantTool:
         referer_url: str | None = None,
         session: requests.Session | None = None,
     ) -> CaptchaImage:
-        if session is None:
-            session = self.session
-        xsrf_token = xsrf_token or session.cookies.get("_xsrf")
-
+        session = session or self.session
         lang = lang or self.captcha_lang
-        target_url = urljoin(
-            referer_url or self.base_url, "/captcha?lang=" + quote(lang)
-        )
-        logger.debug(
-            "Отправляем POST-запрос на %s для получения captcha key",
-            target_url,
-        )
-        res = session.post(
-            target_url,
-            headers={
-                k: v
-                for k, v in {
-                    "Accept": "application/json",
-                    "Referer": referer_url,
-                    "X-Xsrftoken": xsrf_token,
-                    "X-Hhtmfrom": "",
-                    "X-Hhtmsource": "account_captcha",
-                    # Я тут опустил кучу заголовков, так как их значения есть в
-                    # кукис, и сайт, если тех нет, берех их от туда
-                    # Те запрос проходит
-                    "X-Requested-With": "XMLHttpRequest",
-                }.items()
-                if v is not None
-            },
-        ).json()
 
+        target_url = urljoin(referer_url or self.base_url, "/captcha")
+        logger.debug(
+            "Отправляем POST-запрос на %s для получения captcha key", target_url
+        )
+
+        res = self._xhr_request(
+            "POST",
+            target_url,
+            params={"lang": lang},
+            referer_url=referer_url,
+            headers=_CAPTCHA_HEADERS,
+            xsrf_token=xsrf_token,
+            session=session,
+        )
         captcha_key = res["key"]
 
         image_url = urljoin(
@@ -805,25 +1054,19 @@ class HHApplicantTool:
         )
         logger.debug("Пробуем загрузить капчу: %s", image_url)
 
-        # Браузер когда встречает в разметке тег IMG, посылает другой Accept
+        # Это не XHR: браузер грузит картинку из тега IMG с другим Accept
+        # и без XHR-заголовков, поэтому здесь обычный session.get.
         headers = {
             "Accept": "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5"
         }
-
         if referer_url:
             headers |= {"Referer": referer_url}
 
-        image_data = session.get(
-            image_url,
-            headers=headers,
-        ).content
+        image_data = session.get(image_url, headers=headers).content
 
         assert len(image_data) > 0, "Ошибка загрузки изображения"
 
-        return CaptchaImage(
-            data=image_data,
-            key=captcha_key,
-        )
+        return CaptchaImage(data=image_data, key=captcha_key)
 
     def _send_captcha(
         self,
@@ -838,12 +1081,9 @@ class HHApplicantTool:
         """Отправляет введенную капчу."""
 
         captcha_endpoint = "/account/captcha"
-        target_url: str = urljoin(
-            referer_url or self.base_url, captcha_endpoint
-        )
+        target_url = urljoin(referer_url or self.base_url, captcha_endpoint)
 
         failurl = captcha_endpoint + "?state=" + quote(state)
-
         if backurl:
             failurl += "&backurl=" + quote(backurl)
 
@@ -855,53 +1095,31 @@ class HHApplicantTool:
             "failurl": failurl,
         }
 
-        headers = {
-            "Accept": "application/json",
-            "X-Requested-With": "XMLHttpRequest",
-            "X-Xsrftoken": xsrf_token,
-            "x-hhtmfrom": "",
-            "x-hhtmsource": "account_captcha",
-        }
-
-        if referer_url:
-            headers |= {"Referer": referer_url}
-
-        logger.debug(f"POST {target_url}: {payload=}, {headers=}")
+        logger.debug(f"POST {target_url}: {payload=}")
 
         # payload уходит в query string, тело пустое (так делает браузер).
-        # allow_redirects=False: при успехе 302 ведёт на hh://..., такую
-        # схему requests не умеет, а нам сам редирект не нужен.
-        r = session.post(
-            target_url,
-            params=payload,
-            headers=headers,
-            allow_redirects=False,
-        )
-
-        logger.debug(f"{r.request.method} {r.request.url} {r.status_code}")
-
-        if r.status_code == 302:
+        # Редиректы xhr_request не выполняет: при успехе 302 ведёт на hh://...,
+        # такую схему requests не умеет, а сам редирект не нужен.
+        try:
+            res = self._xhr_request(
+                "POST",
+                target_url,
+                params=payload,
+                referer_url=referer_url,
+                headers=_CAPTCHA_HEADERS,
+                xsrf_token=xsrf_token,
+                session=session,
+            )
+            logger.debug("%.300s", res)
             return True
-
-        if r.status_code == 403:
+        except Error:
             return False
 
-        # Произошло что-то странное
-        logger.warning(
-            "Неожиданный код ответа на отправку капчи: %d", r.status_code
-        )
-        logger.debug(r.text[:255])
-        return False
-
-    def prompt_captcha_tk(self, image_data: bytes) -> str:
+    def prompt_captcha_tkinter(self, image_data: bytes) -> str:
         """Показывает капчу в окне Tk и возвращает введённый текст.
 
         Если окно закрыли, не введя текст, бросает KeyboardInterrupt.
         """
-        import base64
-        import tkinter as tk
-        from tkinter import ttk
-
         placeholder = "Введите текст с картинки"
         result: list[str] = []
 
@@ -958,13 +1176,7 @@ class HHApplicantTool:
         root.focus_force()
         root.mainloop()
 
-        # Окно было закрыто
-        # if not result:
-        #     raise KeyboardInterrupt()
-
-        # Пусть падает.
-        # Правильное решение тут только дать случиться неизбежному.
-        return result[0].strip()
+        return (result or [""])[0]
 
     def logout(self) -> None:
         self.session.get(f"{self.base_url}/logout", {"hhtmFrom": "main"})
@@ -983,8 +1195,106 @@ class HHApplicantTool:
             self.api_client.reset_tokens()
 
     @cached_property
-    def captcha_ai(self) -> ai.ChatOpenAI:
+    def captcha_ai(self) -> ai.OpenAIClient:
         return self._get_captcha_ai()
+
+    @staticmethod
+    def _format_experience(
+        experience: list[dict[str, Any]] | None, limit: int = 3
+    ) -> str:
+        blocks = []
+        for exp in (experience or [])[:limit]:
+            end = exp.get("end") or "по настоящее время"
+            head = "\n".join(
+                filter(
+                    None,
+                    [
+                        exp.get("position"),
+                        exp.get("company"),
+                        f"{exp.get('start') or ''} - {end}",
+                    ],
+                )
+            )
+            # Не надо в описании поэмы писать
+            description = shorten(
+                (exp.get("description") or "").strip(),
+                limit=1000,
+            )
+            blocks.append(f"{head}\n\n{description}".strip())
+        return "\n\n".join(blocks)
+
+    def get_resume_placeholders(self, resume_id: str) -> ResumePlaceholders:
+        """Данные резюме для подстановки в шаблон промпта AI-фильтра."""
+
+        resume: api.datatypes.Resume = self.api_client.get(
+            f"/resumes/{resume_id}"
+        )
+
+        # logger.debug("resume: %r", resume)
+
+        rv = {
+            k: v
+            for k, v in resume.items()
+            if k in ["first_name", "middle_name", "last_name"]
+        }
+
+        rv["resume_title"] = resume.get("title") or ""
+        rv["resume_city"] = resume.get("area", {}).get("name") or ""
+        # Почему тут ебаут?
+        rv["resume_about"] = resume.get("skills") or ""
+        rv["resume_skills"] = ", ".join(resume.get("skill_set") or [])
+        rv["resume_employment_form"] = ", ".join(
+            i["name"] for i in (resume.get("employment_form") or [])
+        )
+        rv["resume_work_format"] = ", ".join(
+            i["name"] for i in (resume.get("work_format") or [])
+        )
+        rv["resume_citizenship"] = ", ".join(
+            i["name"] for i in resume.get("citizenship", [])
+        )
+        salary = resume.get("salary", {})
+        rv["resume_salary"] = (
+            f"{salary.get('amount', '')} {salary.get('currency', '').replace('RUR', 'руб.')}".strip()
+        )
+        education = resume.get("education", {})
+
+        try:
+            primary_education = education["primary"][0]
+        except (KeyError, IndexError):
+            primary_education = {}
+
+        rv["resume_education"] = ", ".join(
+            filter(
+                None,
+                [
+                    # высшее/среднее
+                    education.get("level", {}).get("name"),
+                    # Шарага
+                    primary_education.get("name"),
+                    # Факультет
+                    primary_education.get("organization"),
+                    # Специальность
+                    primary_education.get("result"),
+                    # Год
+                    str(primary_education.get("year") or ""),
+                ],
+            )
+        )
+
+        rv["resume_experience"] = self._format_experience(
+            resume.get("experience") or []
+        )
+        rv["resume_total_experience"] = self._format_total_expirience(
+            resume.get("total_experience", {}).get("months") or 0
+        )
+        return rv
+
+    @staticmethod
+    def _format_total_expirience(months: int) -> str:
+        if not months:
+            return "без опыта"
+        years, rest = divmod(months, 12)
+        return f"{years} г. {rest} мес."
 
     def _save_token(self, token: dict[str, Any]) -> None:
         self.token_config.update(token=token)

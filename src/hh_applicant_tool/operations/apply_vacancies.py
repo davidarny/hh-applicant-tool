@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import html
 import logging
 import random
 import re
-import time
 from email.message import EmailMessage
 from itertools import chain
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator, NoReturn
 from urllib.parse import (
     urlparse,
 )
@@ -18,14 +17,17 @@ from urllib.parse import (
 import requests
 
 from ..ai.base import AIError
+from ..ai.openai import OpenAIClient
 from ..api import BadResponse, Redirect, datatypes
-from ..api.datatypes import PaginatedItems, SearchVacancy
+from ..api.datatypes import PaginatedItems, SearchVacancy, Vacancy
 from ..api.errors import ApiError, LimitExceeded
-from ..errors import OperationError
+from ..constants import GITHUB_PROFILE_URL, GITHUB_REPO_URL
+from ..errors import OperationError, XHRError
 from ..tool import BaseNamespace, BaseOperation
 from ..utils.datatypes import VacancyTestsData
 from ..utils.string import (
     bool2str,
+    choose_similar,
     rand_text,
     render_template,
     shorten,
@@ -36,7 +38,22 @@ if TYPE_CHECKING:
     from ..tool import HHApplicantTool
 
 
-logger = logging.getLogger("hh-applicant-tool")
+# Классы, имена которых начинаются с _, не импортируются при `import *`
+@dataclasses.dataclass
+class _ApplyState:
+    """Изменяемое состояние рассылки для одного резюме."""
+
+    applied_count: int = 0
+    limit_reached: bool = False
+    do_apply: bool = True
+    site_emails: dict = dataclasses.field(default_factory=dict)
+
+
+class _ApplyError(Exception):
+    """Отклик на вакансию не отправлен. Вакансия пропускается."""
+
+
+logger = logging.getLogger(__name__.split(".")[0])
 
 # Параметры поиска вакансий, задаваемые флагами
 SEARCH_PARAM_NAMES = (
@@ -117,25 +134,40 @@ DEFAULT_COVER_LETTER_PROMPT = (
 )
 
 DEFAULT_AI_FILTER_PROMPT = """\
-Резюме кандидата:
-Должность: %(resume_title)s
-Навыки: %(resume_skills)s
+Название резюме: %(resume_title)s
+Навыки, перечисленные в резюме: %(resume_skills)s
+Опыт работы соискателя: %(resume_total_experience)s
+Зарплата, указанная в резюме: %(resume_salary)s
+Предпочитаемый соискателем формат работы: %(resume_work_format)s
+
+========================================
 
 Вакансия: %(vacancy_name)s
-Ключевые навыки: %(vacancy_key_skills)s
-Описание: %(vacancy_description)s
+Навыки, требуемые в вакансии: %(vacancy_skills)s
+Описание вакансии: %(vacancy_description).2000s
 
 Подходит ли эта вакансия кандидату?"""
 
 DEFAULT_TEST_CHOICE_PROMPT = (
     "Вопрос: %(question)s\n"
-    "Варианты:\n%(options)s\n"
+    "Варианты:\n%(reply_options)s\n"
     "Выбери правильный вариант. Ответь только его ID."
 )
 
-DEFAULT_TEST_TEXT_PROMPT = (
-    "Вопрос: %(question)s\nДай краткий ответ. Только текст ответа."
-)
+DEFAULT_TEST_TEXT_PROMPT = """\
+Тебя зовут: %(first_name)s
+Ты ищешь работу в качестве: %(resume_title)s
+Твой профиль на github: %(github_profile_url)s
+Ты хочешь зарплату: %(resume_salary)s
+Подходящие форматы работы: %(resume_work_format)s
+
+Ссылку на GitHub отправляй только если тебя об этом просят.
+
+Ответь на вопрос.
+
+Вопрос: %(question)s
+
+Верни только текст."""
 
 DEFAULT_APPLY_MAIL_SUBJECT = "{Отклик|Резюме} на вакансию %(vacancy_name)s"
 DEFAULT_APPLY_MAIL_BODY = "{Здравствуйте|Добрый день}, {прошу рассмотреть|пожалуйста рассмотрите} мое резюме %(resume_url)s на вакансию %(vacancy_name)s."
@@ -144,8 +176,7 @@ DEFAULT_APPLY_MAIL_BODY = "{Здравствуйте|Добрый день}, {п
 class Namespace(BaseNamespace):
     resume_id: str | None
     cover_letter: str | None
-    ignore_employers: Path | None
-    force_letter: bool
+    force_cover_letter: bool
     ai_filter: bool | None
     ai_filter_system_prompt: str
     ai_filter_prompt: str
@@ -192,26 +223,83 @@ class Namespace(BaseNamespace):
 class Operation(BaseOperation):
     """Откликнуться на все подходящие вакансии."""
 
-    __aliases__ = ("apply", "apply-similar")
+    __aliases__ = ("apply",)
+
+    # Инициализируются в run()
+    tool: HHApplicantTool
+    cover_letter: str
+    dry_run: bool
+    excluded_pat: re.Pattern[str] | None
+    force_cover_letter: bool | None
+    max_responses: int | None
+    resume_id: str | None
+    send_email: bool | None
+    skip_tests: bool | None
+    total_pages: int
+
+    # Шаблоны промптов и писем
+    cover_letter_prompt: str
+    ai_filter_prompt: str
+    test_choice_prompt: str
+    test_text_prompt: str
+    apply_mail_subject: str
+    apply_mail_body: str
+
+    # AI
+    ai_filter: bool
+    cover_letter_ai: OpenAIClient | None
+    vacancy_filter_ai: OpenAIClient | None
+    test_ai: OpenAIClient | None
+
+    # Параметры поиска (проставляются через setattr из SEARCH_PARAM_NAMES)
+    text: str | None
+    search_field: list[str] | None
+    order_by: str | None
+    per_page: int
+    experience: str | None
+    schedule: str | None
+    work_format: list[str] | None
+    employment: list[str] | None
+    area: list[str] | None
+    metro: list[str] | None
+    professional_role: list[str] | None
+    industry: list[str] | None
+    employer_id: list[str] | None
+    excluded_employer_id: list[str] | None
+    currency: str | None
+    salary: int | None
+    only_with_salary: bool | None
+    label: list[str] | None
+    period: int | None
+    date_from: str | None
+    date_to: str | None
+    top_lat: float | None
+    bottom_lat: float | None
+    left_lng: float | None
+    right_lng: float | None
+    sort_point_lat: float | None
+    sort_point_lng: float | None
+    no_magic: bool | None
+    premium: bool | None
 
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--resume-id", help="Идентефикатор резюме")
         parser.add_argument(
-            "-l",
+            "--force-cover-letter",
             "--force-letter",
-            "--letter",
-            help="Всегда отправлять сопроводительное письмо при отклике",
+            help="Всегда отправлять сопроводительное письмо при отклике, даже когда оно не требуется",
             action=argparse.BooleanOptionalAction,
+            default=True,
         )
         parser.add_argument(
             "--ai-filter",
-            help="Использовать AI для фильтрации вакансий",
+            help="Использовать дополнительную фильтрацию вакансий через AI (вакансии непрошедшие фильтр попадают в черный список)",
             action=argparse.BooleanOptionalAction,
         )
         parser.add_argument(
             "--total-pages",
             "--pages",
-            help="Количество обрабатываемых страниц поиска",  # noqa: E501
+            help="Количество обрабатываемых страниц поиска. Больше 2000 результатов API не отдает",  # noqa: E501
             default=20,
             type=int,
         )
@@ -228,7 +316,7 @@ class Operation(BaseOperation):
         parser.add_argument(
             "--excluded-filter",
             type=str,
-            help="Исключить вакансии, если название или описание не соответствует шаблону. Например, `--excluded-filter 'junior|стажир|bitrix|дружн\\w+ коллектив|полиграф|open\\s*space|опенспейс|хакатон|конкурс|тестов\\w+ задан'`",
+            help="Исключить вакансии, если название или описание не соответствует шаблону. Например, `--excluded-filter 'junior|стажир|bitrix|дружн\\w+ коллектив|полиграф|open\\s*space|опенспейс|хакатон|конкурс|тестов\\w+ задан'`. Вакансии попапвшие под фильтр попадают в черный список",
         )
         parser.add_argument(
             "--max-responses",
@@ -400,7 +488,7 @@ class Operation(BaseOperation):
                 raise OperationError(
                     f"Некорректное регулярное выражение в --excluded-filter: {ex}"
                 ) from ex
-        self.force_letter = args.force_letter
+        self.force_cover_letter = args.force_cover_letter
         self.max_responses = args.max_responses
         self.resume_id = args.resume_id
         self.send_email = args.send_email
@@ -451,43 +539,12 @@ class Operation(BaseOperation):
 
         self._apply_vacancies()
 
-    def _get_resume_info(self, resume_id: str | None) -> dict[str, str]:
-        """Данные резюме для подстановки в шаблон промпта AI-фильтра."""
-        info = {
-            "resume_skills": "",
-            "resume_about": "",
-            "resume_experience": "",
-        }
-        if not resume_id:
-            return info
-
-        full_resume = self.api_client.get(f"/resumes/{resume_id}")
-
-        # hh.ru отдаёт skills как null, когда поле не заполнено,
-        # и .get(..., "") тут не спасает: null уже есть в ответе
-        info["resume_about"] = full_resume.get("skills") or ""
-        info["resume_skills"] = ", ".join(full_resume.get("skill_set") or [])
-
-        lines = []
-        for exp in full_resume.get("experience") or []:
-            end = exp.get("end") or "по настоящее время"
-            lines.append(
-                f"- {exp.get('company') or 'Не указано'}, "
-                f"{exp.get('position') or 'Не указано'} "
-                f"({exp.get('start') or ''} - {end})"
-            )
-            if exp.get("description"):
-                lines.append(f"  {exp['description']}")
-        info["resume_experience"] = "\n".join(lines)
-
-        return info
-
     # Если AI ответил что-то непонятное, лучше не отбрасывать вакансию
     @staticmethod
     def _parse_is_suitable_response(response: str) -> bool:
         answer = response.strip().lower().strip(" .!\"'«»")
 
-        if re.match(r"(нет|no|false)\b", answer):
+        if re.match(r"(нет?|no|false)\b", answer):
             return False
 
         return True
@@ -498,11 +555,10 @@ class Operation(BaseOperation):
         if not self.vacancy_filter_ai:
             return True
 
-        full_vacancy = (
-            self.api_client.get(f"/vacancies/{vacancy['id']}")
-            if vacancy.get("id")
-            else {}
+        full_vacancy: Vacancy = self.api_client.get(
+            f"/vacancies/{vacancy['id']}"
         )
+
         key_skills = ", ".join(
             s["name"]
             for s in (full_vacancy.get("key_skills") or [])
@@ -516,7 +572,7 @@ class Operation(BaseOperation):
                 "vacancy_description": strip_tags(
                     full_vacancy.get("description") or ""
                 ),
-                "vacancy_key_skills": key_skills,
+                "vacancy_skills": key_skills,
             },
             "промпта AI-фильтра",
         )
@@ -527,14 +583,17 @@ class Operation(BaseOperation):
 
     def _apply_vacancies(self) -> None:
         resumes: list[datatypes.Resume] = self.tool.get_resumes()
+
+        # Выбираем только опубликованные
+        resumes = [x for x in resumes if x["status"]["id"] == "published"]
+
+        if not resumes:
+            raise OperationError("У вас нет опубликованных резюме")
+
         if self.resume_id:
             resumes = [x for x in resumes if x["id"] == self.resume_id]
             if not resumes:
                 raise OperationError(f"Резюме {self.resume_id} не найдено")
-        # Выбираем только опубликованные
-        resumes = [x for x in resumes if x["status"]["id"] == "published"]
-        if not resumes:
-            raise OperationError("У вас нет опубликованных резюме")
 
         me: datatypes.User = self.tool.get_me()
         seen_employers = set()
@@ -607,10 +666,66 @@ class Operation(BaseOperation):
             resume["title"],
         )
         print("🚀 Начинаю рассылку откликов для резюме:", resume["title"])
-        applied_count = 0
-        limit_reached = False
 
+        state = _ApplyState()
+        placeholders = self._build_resume_placeholders(resume, user)
+        if seen_vacancies is None:
+            seen_vacancies = set()
+
+        for vacancy in self._get_vacancies(resume_id=resume["id"]):
+            if not state.do_apply or self._max_responses_reached(state):
+                break
+            # Любая ошибка отклика (и вакансии в целом) здесь превращается
+            # в пропуск вакансии, приложение не падает
+            try:
+                self._process_vacancy(
+                    vacancy,
+                    resume,
+                    placeholders,
+                    seen_employers,
+                    seen_vacancies,
+                    state,
+                )
+            except LimitExceeded:
+                state.do_apply = False
+                state.limit_reached = True
+                break
+            except Redirect:
+                logger.warning(
+                    "Игнорирую перенаправление на форму: %s",
+                    vacancy["alternate_url"],
+                )
+            except (ApiError, XHRError, _ApplyError) as ex:
+                logger.warning(
+                    "Пропускаю вакансию %s: %s", vacancy["alternate_url"], ex
+                )
+            except (
+                BadResponse,
+                AIError,
+                ValueError,
+                requests.RequestException,
+            ) as ex:
+                logger.error(
+                    "Пропускаю вакансию %s: %s", vacancy["alternate_url"], ex
+                )
+
+        logger.info(
+            "Закончили рассылку откликов для резюме: %s (%s). Отправлено: %d",
+            resume["alternate_url"],
+            resume["title"],
+            state.applied_count,
+        )
+        print(
+            f"✅️ Закончили рассылку для резюме: {resume['title']}. "
+            f"Отправлено: {state.applied_count}"
+        )
+        return state.limit_reached
+
+    def _build_resume_placeholders(
+        self, resume: datatypes.Resume, user: datatypes.User
+    ) -> dict:
         placeholders = {
+            # Могут быть перезаписаны значениями из резюме
             "first_name": user.get("first_name") or "",
             "last_name": user.get("last_name") or "",
             "email": user.get("email") or "",
@@ -618,321 +733,356 @@ class Operation(BaseOperation):
             "resume_hash": resume.get("id") or "",
             "resume_title": resume.get("title") or "",
             "resume_url": resume.get("alternate_url") or "",
+            "github_profile_url": self.tool.general_config.get(
+                "github_profile_url", GITHUB_PROFILE_URL
+            ),
+        }
+        placeholders.update(
+            self.tool.get_resume_placeholders(resume.get("id")),
+        )
+        return placeholders
+
+    def _max_responses_reached(self, state: _ApplyState) -> bool:
+        if self.max_responses and state.applied_count >= self.max_responses:
+            logger.info(
+                "Достигнут лимит откликов --max-responses (%d). Останавливаюсь.",
+                self.max_responses,
+            )
+            return True
+        return False
+
+    def _process_vacancy(
+        self,
+        vacancy: dict,
+        resume: datatypes.Resume,
+        placeholders: dict,
+        seen_employers: set[str],
+        seen_vacancies: set[tuple[str, str]],
+        state: _ApplyState,
+    ) -> None:
+        employer = vacancy.get("employer", {})
+        message_placeholders = {
+            "vacancy_name": vacancy.get("name", ""),
+            "vacancy_url": vacancy.get("alternate_url") or "",
+            "employer_name": employer.get("name", ""),
+            **placeholders,
         }
 
-        if self.ai_filter:
-            placeholders.update(self._get_resume_info(resume.get("id")))
+        # По факту контакты можно получить только здесь?!
+        if vacancy.get("contacts"):
+            logger.debug(
+                f"Найдены контакты в вакансии: {vacancy['alternate_url']}"
+            )
 
-        do_apply = True
-        site_emails = {}
-        if seen_vacancies is None:
-            seen_vacancies = set()
+        if not state.do_apply or self._should_skip_vacancy(
+            vacancy, seen_vacancies
+        ):
+            return
+        if self._is_vacancy_rejected(vacancy, message_placeholders):
+            return
 
-        for vacancy in self._get_vacancies(resume_id=resume["id"]):
-            if self.max_responses and applied_count >= self.max_responses:
-                logger.info(
-                    "Достигнут лимит откликов --max-responses (%d). Останавливаюсь.",
-                    self.max_responses,
-                )
-                break
-            try:
-                employer = vacancy.get("employer", {})
+        self._load_employer(employer, seen_employers, state)
+        letter = self._build_cover_letter(vacancy, message_placeholders)
 
-                message_placeholders = {
-                    "vacancy_name": vacancy.get("name", ""),
-                    "vacancy_url": vacancy.get("alternate_url") or "",
-                    "employer_name": employer.get("name", ""),
-                    **placeholders,
-                }
+        if clone_key := self._vacancy_clone_key(vacancy):
+            seen_vacancies.add(clone_key)
 
-                # По факту контакты можно получить только здесь?!
-                if vacancy.get("contacts"):
-                    logger.debug(
-                        f"Найдены контакты в вакансии: {vacancy['alternate_url']}"
-                    )
+        logger.debug(
+            "Пробуем откликнуться на вакансию: %s", vacancy["alternate_url"]
+        )
 
-                if not do_apply:
-                    continue
+        if self.dry_run:
+            logger.info(
+                "[dry-run] Отклик не отправляется: %s", vacancy["alternate_url"]
+            )
+            return
 
-                vacancy_id = vacancy["id"]
-                relations = vacancy.get("relations", [])
-                clone_key = self._vacancy_clone_key(vacancy)
+        # Если отклик не отправлен, функции ниже бросают исключение, и до
+        # отправки письма дело не доходит
+        if vacancy.get("has_test"):
+            self._apply_with_test(
+                vacancy, resume, letter, message_placeholders, state
+            )
+        else:
+            self._send_negotiation(vacancy, resume, letter, state)
 
-                if relations:
-                    if clone_key:
-                        seen_vacancies.add(clone_key)
-                    if "got_rejection" in relations:
-                        logger.debug(
-                            "Вы получили отказ от %s",
-                            vacancy["alternate_url"],
-                        )
-                        print("⛔ Пришел отказ от", vacancy["alternate_url"])
-                    logger.debug(
-                        "Пропускаем вакансию с откликом: %s",
-                        vacancy["alternate_url"],
-                    )
-                    continue
+        if self.send_email:
+            self._send_apply_email(
+                vacancy,
+                employer.get("id"),
+                message_placeholders,
+                state,
+            )
 
-                if clone_key and clone_key in seen_vacancies:
-                    logger.info(
-                        "Пропускаем копию вакансии, на которую уже был отклик: %s",
-                        vacancy["alternate_url"],
-                    )
-                    print(
-                        "⏩ Копия вакансии, на которую уже был отклик",
-                        vacancy["alternate_url"],
-                    )
-                    continue
+    def _should_skip_vacancy(
+        self, vacancy: dict, seen_vacancies: set[tuple[str, str]]
+    ) -> bool:
+        """Пропускаем вакансии, на которые нельзя или не нужно откликаться."""
+        url = vacancy["alternate_url"]
+        clone_key = self._vacancy_clone_key(vacancy)
 
-                if vacancy.get("archived"):
-                    logger.debug(
-                        "Пропускаем вакансию в архиве: %s",
-                        vacancy["alternate_url"],
-                    )
-                    continue
+        if relations := vacancy.get("relations", []):
+            if clone_key:
+                seen_vacancies.add(clone_key)
+            if "got_rejection" in relations:
+                logger.debug("Вы получили отказ от %s", url)
+                print("⛔ Пришел отказ от", url)
+            logger.debug("Пропускаем вакансию с откликом: %s", url)
+            return True
 
-                if vacancy.get("has_test") and self.skip_tests:
-                    logger.debug(
-                        "Пропускаю вакансию с тестом %s",
-                        vacancy["alternate_url"],
-                    )
-                    continue
+        if clone_key and clone_key in seen_vacancies:
+            logger.info(
+                "Пропускаем копию вакансии, на которую уже был отклик: %s", url
+            )
+            print("⏩ Копия вакансии, на которую уже был отклик", url)
+            return True
 
-                if redirect_url := vacancy.get("response_url"):
-                    logger.debug(
-                        "Пропускаем вакансию %s с перенаправлением: %s",
-                        vacancy["alternate_url"],
-                        redirect_url,
-                    )
-                    continue
+        if vacancy.get("archived"):
+            logger.debug("Пропускаем вакансию в архиве: %s", url)
+            return True
 
-                if self._is_excluded(vacancy):
-                    logger.info(
-                        "Вакансия попала под фильтр: %s",
-                        vacancy["alternate_url"],
-                    )
+        if vacancy.get("has_test") and self.skip_tests:
+            logger.debug("Пропускаю вакансию с тестом %s", url)
+            return True
 
-                    if not self.dry_run:
-                        self.api_client.put(
-                            f"/vacancies/blacklisted/{vacancy['id']}"
-                        )
-                        logger.info(
-                            "Вакансия добавлена в черный список: %s",
-                            vacancy["alternate_url"],
-                        )
-                    continue
+        if redirect_url := vacancy.get("response_url"):
+            logger.debug(
+                "Пропускаем вакансию %s с перенаправлением: %s",
+                url,
+                redirect_url,
+            )
+            return True
 
-                # AI фильтрация вакансий
-                if self.ai_filter and self.vacancy_filter_ai:
-                    if not self._is_vacancy_suitable(
-                        vacancy, message_placeholders
-                    ):
-                        logger.info(
-                            "Вакансия отклонена AI фильтром: %s",
-                            vacancy["alternate_url"],
-                        )
-                        print(
-                            "🧠 AI посчитал неподходящей",
-                            vacancy["alternate_url"],
-                        )
-                        if not self.dry_run:
-                            self.api_client.put(
-                                f"/vacancies/blacklisted/{vacancy['id']}"
-                            )
-                        continue
+        return False
 
-                # Перед откликом выгружаем профиль компании
-                employer_id = employer.get("id")
-                if employer_id and employer_id not in seen_employers:
-                    employer_profile: datatypes.Employer = self.api_client.get(
-                        f"/employers/{employer_id}"
-                    )
+    def _blacklist_vacancy(self, vacancy: dict) -> None:
+        if not self.dry_run:
+            self.api_client.put(f"/vacancies/blacklisted/{vacancy['id']}")
 
-                    # Какая блядь эту строку стерла?
-                    seen_employers.add(employer_id)
+    def _is_vacancy_rejected(
+        self, vacancy: dict, message_placeholders: dict
+    ) -> bool:
+        """Обычные фильтры + AI фильтр. True — вакансия отброшена."""
+        url = vacancy["alternate_url"]
 
-                    # Если есть сайт, то ищем на нем емейлы для отправки письма
-                    if self.send_email and (
-                        site_url := (
-                            employer_profile.get("site_url") or ""
-                        ).strip()
-                    ):
-                        site_url = (
-                            site_url
-                            if "://" in site_url
-                            else "https://" + site_url
-                        )
-                        logger.debug("visit site: %s", site_url)
+        if self._is_excluded(vacancy):
+            logger.info("Вакансия попала под фильтр: %s", url)
+            self._blacklist_vacancy(vacancy)
+            if not self.dry_run:
+                logger.info("Вакансия добавлена в черный список: %s", url)
+            return True
 
-                        try:
-                            site_info = self._parse_site(site_url)
-                            site_emails[employer_id] = site_info["emails"]
-                        except requests.RequestException as ex:
-                            site_info = None
-                            logger.error(ex)
+        if (
+            self.ai_filter
+            and self.vacancy_filter_ai
+            and not self._is_vacancy_suitable(vacancy, message_placeholders)
+        ):
+            logger.info("Вакансия отклонена AI фильтром: %s", url)
+            print("🧠 AI посчитал неподходящей", url)
+            self._blacklist_vacancy(vacancy)
+            return True
 
-                        if site_info:
-                            logger.debug("site info: %r", site_info)
+        return False
 
-                letter = ""
+    def _load_employer(
+        self, employer: dict, seen_employers: set[str], state: _ApplyState
+    ) -> None:
+        """Перед откликом выгружаем профиль компании."""
+        employer_id = employer.get("id")
+        if not employer_id or employer_id in seen_employers:
+            return
 
-                if self.force_letter or vacancy.get("response_letter_required"):
-                    if self.cover_letter_ai:
-                        prompt = render_template(
-                            self.cover_letter_prompt,
-                            message_placeholders,
-                            "промпта сопроводительного письма",
-                        )
-                        logger.debug("prompt: %s", prompt)
-                        letter = self.cover_letter_ai.complete(prompt)
-                    else:
-                        letter = render_template(
-                            rand_text(self.cover_letter),
-                            message_placeholders,
-                            "сопроводительного письма",
-                        )
+        employer_profile: datatypes.Employer = self.api_client.get(
+            f"/employers/{employer_id}"
+        )
 
-                    logger.debug("Сопроводительное письмло: %.255s", letter)
+        # Какая блядь эту строку стерла?
+        seen_employers.add(employer_id)
 
-                if clone_key:
-                    seen_vacancies.add(clone_key)
+        self._collect_site_emails(employer_profile, employer_id, state)
 
-                logger.debug(
-                    "Пробуем откликнуться на вакансию: %s",
-                    vacancy["alternate_url"],
-                )
+    def _collect_site_emails(
+        self,
+        employer_profile: datatypes.Employer,
+        employer_id: str,
+        state: _ApplyState,
+    ) -> None:
+        """Если есть сайт, то ищем на нем емейлы для отправки письма."""
+        if not self.send_email:
+            return
+        site_url = (employer_profile.get("site_url") or "").strip()
+        if not site_url:
+            return
 
-                if vacancy.get("has_test"):
-                    logger.debug(
-                        "Решаем тест: %s",
-                        vacancy["alternate_url"],
-                    )
+        if "://" not in site_url:
+            site_url = "https://" + site_url
+        logger.debug("visit site: %s", site_url)
 
-                    try:
-                        if not self.dry_run:
-                            result = self._solve_vacancy_test(
-                                vacancy_id=vacancy["id"],
-                                resume_hash=resume["id"],
-                                letter=letter,
-                            )
-                            if result.get("success") == "true":
-                                applied_count += 1
-                                logger.info(
-                                    "Отправили отклик на вакансию с тестом: %s",
-                                    vacancy["alternate_url"],
-                                )
-                                print(
-                                    "📨 Отправили отклик на вакансию с тестом",
-                                    vacancy["alternate_url"],
-                                )
-                            else:
-                                err = (
-                                    result.get("error")
-                                    if isinstance(result, dict)
-                                    else None
-                                )
+        # Недоступный сайт работодателя не должен мешать отклику
+        try:
+            site_info = self._parse_site(site_url)
+            logger.debug(site_info)
+            state.site_emails[employer_id] = site_info["emails"]
+        except requests.RequestException as ex:
+            logger.error(ex)
+            return
 
-                                if err == "negotiations-limit-exceeded":
-                                    do_apply = False
-                                    limit_reached = True
-                                    break
-                                else:
-                                    logger.error(
-                                        "Произошла ошибка при отклике на вакансию с тестом: %s, result: %.300s",
-                                        vacancy["alternate_url"],
-                                        result,
-                                    )
+        if site_info:
+            logger.debug("site info: %r", site_info)
 
-                            # Какой-то негодяй тут continue убрал и отклик
-                            # повторно отправлялся
-                            continue
+    def _build_cover_letter(
+        self, vacancy: dict, message_placeholders: dict
+    ) -> str:
+        if not (
+            self.force_cover_letter or vacancy.get("response_letter_required")
+        ):
+            return ""
 
-                    except Exception as ex:
-                        logger.error(f"Произошла непредвиденная ошибка: {ex}")
-                        continue
+        if self.cover_letter_ai:
+            prompt = render_template(
+                self.cover_letter_prompt,
+                message_placeholders,
+                "промпта сопроводительного письма",
+            )
+            logger.debug("prompt: %s", prompt)
+            letter = self.cover_letter_ai.complete(prompt)
+        else:
+            letter = render_template(
+                rand_text(self.cover_letter),
+                message_placeholders,
+                "сопроводительного письма",
+            )
 
-                params = {
-                    "resume_id": resume["id"],
-                    "vacancy_id": vacancy_id,
-                    "message": letter,
-                }
+        logger.debug("Сопроводительное письмо: %.255s", letter)
+        return letter
 
-                try:
-                    if not self.dry_run:
-                        res = self.api_client.post(
-                            "/negotiations",
-                            params,
-                            delay=random.uniform(1, 3),
-                        )
-                        assert res == {}
-                        applied_count += 1
-                        logger.info(
-                            "Отправили отклик на вакнсию без теста: %s",
-                            vacancy["alternate_url"],
-                        )
-                        print(
-                            "📨 Отправили отклик на вакансию",
-                            vacancy["alternate_url"],
-                        )
-                except Redirect:
-                    logger.warning(
-                        f"Игнорирую перенаправление на форму: {vacancy['alternate_url']}"  # noqa: E501
-                    )
-                    continue
+    def _apply_with_test(
+        self,
+        vacancy: dict,
+        resume: datatypes.Resume,
+        letter: str,
+        message_placeholders: dict,
+        state: _ApplyState,
+    ) -> None:
+        """Отклик на вакансию с тестом. При неудаче бросает исключение."""
+        logger.debug("Решаем тест: %s", vacancy["alternate_url"])
+        solved_tests, response_url = self._solve_vacancy_test(
+            vacancy_id=vacancy["id"],
+            resume_hash=resume["id"],
+            letter=letter,
+            placeholders=message_placeholders,
+        )
+        self._process_tests(solved_tests, response_url, vacancy, state)
 
-                # Отправка письма на email
-                if self.send_email:
-                    # fix NoneType has no attribute get
-                    # contacts может быть null
-                    mail_to: str | list[str] | None = (
-                        vacancy.get("contacts") or {}
-                    ).get("email") or site_emails.get(employer_id)
-                    if mail_to:
-                        mail_to = (
-                            ", ".join(mail_to)
-                            if isinstance(mail_to, list)
-                            else mail_to
-                        )
-                        mail_subject = render_template(
-                            self.apply_mail_subject,
-                            message_placeholders,
-                            "apply_mail_subject",
-                            randomize_text=True,
-                        )
-                        mail_body = render_template(
-                            self.apply_mail_body,
-                            message_placeholders,
-                            "apply_mail_body",
-                            randomize_text=True,
-                            escape_html=True,
-                        )
-                        try:
-                            self._send_email(mail_to, mail_subject, mail_body)
-                            print(
-                                "📧 Отправлено письмо на email по поводу вакансии",
-                                vacancy["alternate_url"],
-                            )
-                        except Exception as ex:
-                            logger.error(f"Ошибка отправки письма: {ex}")
-            except LimitExceeded:
-                do_apply = False
-                limit_reached = True
-                break
-            except ApiError as ex:
-                logger.warning(ex)
-            except (BadResponse, AIError) as ex:
-                logger.error(ex)
+    def _process_tests(
+        self,
+        solved_tests: dict,
+        vacancy_response_url: str,
+        vacancy: dict,
+        state: _ApplyState,
+    ) -> None:
+        """Отправляем решённый тест (капчу решает xhr_request).
 
+        Возвращает управление только если отклик отправлен.
+        """
+        result = self._send_vacancy_test(
+            solved_tests, referer_url=vacancy_response_url
+        )
+
+        if str(result.get("success")).lower() == "true":
+            state.applied_count += 1
+            logger.info(
+                "Отправили отклик на вакансию с тестом: %s",
+                vacancy["alternate_url"],
+            )
+            print(
+                "📨 Отправили отклик на вакансию с тестом",
+                vacancy["alternate_url"],
+            )
+            return
+
+        self._handle_test_error(result, state)
+
+    def _handle_test_error(self, result: dict, state: _ApplyState) -> NoReturn:
+        if result.get("error") == "negotiations-limit-exceeded":
+            state.do_apply = False
+            state.limit_reached = True
+            raise _ApplyError("Достигнут лимит откликов")
+
+        raise _ApplyError(
+            f"Ошибка при отклике на вакансию с тестом: {shorten(str(result), 300)}"
+        )
+
+    def _send_negotiation(
+        self,
+        vacancy: dict,
+        resume: datatypes.Resume,
+        letter: str,
+        state: _ApplyState,
+    ) -> None:
+        """Обычный отклик.
+
+        Возвращает управление только если отклик отправлен. Redirect (hh
+        перенаправил на форму) и остальные ошибки уходят наверх.
+        """
+        res = self.api_client.post(
+            "/negotiations",
+            {
+                "resume_id": resume["id"],
+                "vacancy_id": vacancy["id"],
+                "message": letter,
+            },
+            delay=random.uniform(1, 3),
+        )
+        if res != {}:
+            raise _ApplyError(f"Неожиданный ответ на отклик: {res!r:.300}")
+
+        state.applied_count += 1
         logger.info(
-            "Закончили рассылку откликов для резюме: %s (%s). Отправлено: %d",
-            resume["alternate_url"],
-            resume["title"],
-            applied_count,
+            "Отправили отклик на вакансию без теста: %s",
+            vacancy["alternate_url"],
         )
-        print(
-            f"✅️ Закончили рассылку для резюме: {resume['title']}. Отправлено: {applied_count}"
+        print("📨 Отправили отклик на вакансию", vacancy["alternate_url"])
+
+    def _send_apply_email(
+        self,
+        vacancy: dict,
+        employer_id: str | None,
+        message_placeholders: dict,
+        state: _ApplyState,
+    ) -> None:
+        """Отправка письма на email работодателя."""
+        # contacts может быть null
+        mail_to = (vacancy.get("contacts") or {}).get("email") or (
+            state.site_emails.get(employer_id)
         )
-        return limit_reached
+        if not mail_to:
+            return
+        if isinstance(mail_to, list):
+            mail_to = ", ".join(mail_to)
+
+        mail_subject = render_template(
+            self.apply_mail_subject,
+            message_placeholders,
+            "apply_mail_subject",
+            randomize_text=True,
+        )
+        mail_body = render_template(
+            self.apply_mail_body,
+            message_placeholders,
+            "apply_mail_body",
+            randomize_text=True,
+            escape_html=True,
+        )
+        # Отклик уже отправлен, ошибка SMTP не должна считаться его провалом
+        try:
+            self._send_email(mail_to, mail_subject, mail_body)
+            print(
+                "📧 Отправлено письмо на email по поводу вакансии",
+                vacancy["alternate_url"],
+            )
+        except Exception as ex:
+            logger.error(f"Ошибка отправки письма: {ex}")
 
     def _send_email(self, to: str, subject: str, body: str) -> None:
         cfg = self.tool.config.get("smtp", {})
@@ -953,8 +1103,13 @@ class Operation(BaseOperation):
         vacancy_id: str | int,
         resume_hash: str,
         letter: str = "",
-    ) -> dict[str, Any]:
-        """Загружает тест, ждет паузу и отправляет отклик."""
+        placeholders: dict[str, str] | None = None,
+    ) -> tuple[dict, str]:
+        """Загружает тест и решает его.
+
+        Возвращает payload для отправки и URL страницы отклика (referer).
+        """
+        placeholders = placeholders or {}
         response_url = f"{self.tool.base_url}/applicant/vacancy_response?vacancyId={vacancy_id}&startedWithQuestion=false&hhtmFrom=vacancy"
 
         if not (tests_data := self._get_vacancy_tests(response_url)):
@@ -996,26 +1151,25 @@ class Operation(BaseOperation):
                     )
                     prompt = render_template(
                         self.test_choice_prompt,
-                        {"question": question, "options": options},
+                        {
+                            **placeholders,
+                            "question": question,
+                            "reply_options": options,
+                        },
                         "промпта выбора ответа в тесте",
                     )
-                    ai_answer = self.test_ai.complete(prompt).strip()
-                    logger.debug("AI ответ (выбор): %.255s", ai_answer)
+                    answer = self.test_ai.complete(prompt).strip(". ")
+                    logger.debug("AI ответ (выбор): %.255s", answer)
                     # Берём только ID, который реально есть среди вариантов
-                    valid_ids = {str(s["id"]) for s in solutions}
-                    selected_id = next(
-                        (
-                            x
-                            for x in re.findall(r"\d+", ai_answer)
-                            if x in valid_ids
-                        ),
-                        str(solutions[len(solutions) // 2]["id"]),
+                    # К сожалению нейронка постоянно возвращает мусор
+                    # И поэтому через difflib ищем вариант, который макчимально
+                    # похож на ответ от нейронки
+                    payload[field_name] = choose_similar(
+                        answer, [str(s["id"]) for s in solutions]
                     )
-                    payload[field_name] = selected_id
                 else:
-                    yes_solution = next(
-                        filter(lambda x: x["text"].lower() == "да", solutions),
-                        None,
+                    yes_solution = choose_similar(
+                        "да", [s["text"] for s in solutions]
                     )
 
                     payload[field_name] = (
@@ -1032,19 +1186,19 @@ class Operation(BaseOperation):
                 #     for _ in range(random.randint(3, 15))
                 # )
 
-                if "://" in question:
-                    answer = rand_text(
-                        "{{Простите|Извините}, но я не перехожу по {внешним|сторонним} ссылкам, так как {опасаюсь взлома|не хочу {быть взломанным|подхватить вирус|чтобы у меня {со|с банковского} счета украли деньги}}.|У меня нет времени на заполнение анкет и гуглодоков}"
-                    )
-                elif self.test_ai:
+                if self.test_ai:
                     prompt = render_template(
                         self.test_text_prompt,
-                        {"question": question},
+                        {**placeholders, "question": question},
                         "промпта текстового ответа в тесте",
                     )
                     answer = self.test_ai.complete(prompt)
                     ## добавляем ответ AI на вопрос теста##
                     logger.debug("AI ответ: %.255s", answer)
+                elif "://" in question:
+                    answer = rand_text(
+                        "{{Простите|Извините}, но я не перехожу по {внешним|сторонним} ссылкам, так как {опасаюсь взлома|не хочу {быть взломанным|подхватить вирус|чтобы у меня {со|с банковского} счета украли деньги}}.|У меня нет времени на заполнение анкет и гуглодоков}"
+                    )
                 # Тупоеблые любят вопросы с ответами да/нет, где ответ да является правильным в большинстве случаев.
                 else:
                     answer = "Да"
@@ -1052,49 +1206,31 @@ class Operation(BaseOperation):
                 payload[f"{field_name}_text"] = answer
 
         logger.debug(f"{payload = }")
+        return payload, response_url
 
-        # Ожидание перед отправкой (float)
-        time.sleep(random.uniform(2.0, 3.0))
-
-        response = self.tool.session.post(
-            f"{self.tool.base_url}/applicant/vacancy_response/popup",
+    def _send_vacancy_test(
+        self,
+        payload: dict,
+        referer_url: str,
+    ) -> dict:
+        """Отправляет решённый тест и возвращает JSON-ответ hh."""
+        return self.tool.xhr_request(
+            "POST",
+            "/applicant/vacancy_response/popup",
             data=payload,
+            referer_url=referer_url,
             headers={
-                "Referer": response_url,
-                # x-gib-fgsscgib-w-hh и x-gib-gsscgib-w-hh вроде в куках
-                # передаются и не нужны
                 "X-Hhtmfrom": "vacancy",
                 "X-Hhtmsource": "vacancy_response",
-                "X-Requested-With": "XMLHttpRequest",
-                "X-Xsrftoken": self.tool.xsrf_token,
             },
         )
 
-        logger.debug(
-            "%s %s %d",
-            response.request.method,
-            response.url,
-            response.status_code,
-        )
-
-        try:
-            data = response.json()
-        except (ValueError, requests.exceptions.JSONDecodeError) as ex:
-            logger.warning(
-                "Ответ на отклик с тестом не является JSON (status=%s, %s), result: %s",
-                response.status_code,
-                response.url,
-                shorten(response.text, 300),
-            )
-            raise ValueError(
-                "Эндпоинт отклика на тест вернул не-JSON ответ "
-                "(возможно, перенаправление на капчу или форму)."
-            ) from ex
-
-        return data
-
     def _parse_site(self, url: str) -> dict[str, Any]:
-        with self.tool.session.get(url, timeout=10) as r:
+        with self.tool.session.get(
+            url,
+            timeout=(10, 30),
+            headers={"Referer": GITHUB_REPO_URL},
+        ) as r:
             val = lambda m: html.unescape(m.group(1)) if m else ""
 
             title = val(re.search(r"<title>(.*?)</title>", r.text, re.I | re.S))
@@ -1153,7 +1289,7 @@ class Operation(BaseOperation):
 
     def _get_search_params(self, page: int) -> dict:
         params = {
-            "page": page,
+            **({"page": page} if page else {}),
             "per_page": self.per_page,
         }
         if self.order_by:

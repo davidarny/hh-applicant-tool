@@ -12,7 +12,7 @@ import requests
 from urllib3.util import Timeout
 
 from ..utils.helpers import get_proxies_dict
-from .base import AIError
+from .base import AIClient, AIError
 
 DEFAULT_DELAY = 0.5
 DEFAULT_TIMEOUT = 90.0
@@ -21,7 +21,7 @@ DEFAULT_CONNECT_TIMEOUT = 15.0
 CHAT_COMPLETIONS_ENDPOINT = "/chat/completions"
 
 
-logger = logging.getLogger("hh-applicant-tool")
+logger = logging.getLogger(__name__.split(".")[0])
 
 
 class OpenAIError(AIError):
@@ -29,11 +29,11 @@ class OpenAIError(AIError):
 
 
 @dataclass
-class ChatOpenAI:
+class OpenAIClient(AIClient):
     base_url: str
-    model: str
     _: KW_ONLY
     api_key: str | None = None
+    model: str | None = None
     system_prompt: str | None = None
     # Базовая история диалога, которая подставляется в каждый запрос
     # перед history из вызова complete()/recognize_text()
@@ -44,7 +44,7 @@ class ChatOpenAI:
     connect_timeout: float | None = None
 
     # Параметры для retry логики
-    max_retries: int = 3
+    max_retries: int = 5
 
     temperature: float = 0.0
     max_completion_tokens: int = 1000
@@ -175,8 +175,8 @@ class ChatOpenAI:
         Любые дополнительные параметры (top_p, seed, response_format...)
         добавляются в payload как есть.
         """
+        model = model or self.model
         payload = {
-            "model": model if model is not None else self.model,
             "messages": messages,
             "temperature": (
                 temperature if temperature is not None else self.temperature
@@ -189,6 +189,9 @@ class ChatOpenAI:
             "stream": False,
             **extra,
         }
+
+        if model:
+            payload |= {"model": model}
 
         for attempt in range(self.max_retries + 1):
             try:

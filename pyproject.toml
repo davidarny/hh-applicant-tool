@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "hh-applicant-tool"
-version = "2.4.11"
+version = "2.5.3"
 description = "HH-Applicant-Tool: An automation utility for HeadHunter (hh.ru) designed to streamline the job search process by auto-applying to relevant vacancies and periodically refreshing resumes to stay at the top of recruiter searches."
 homepage = "https://github.com/s3rgeym/hh-applicant-tool"
 repository = "https://github.com/s3rgeym/hh-applicant-tool"
@@ -14,18 +14,16 @@ readme = "README.md"
 packages = [
   { include = "hh_applicant_tool", from = "src" },
 ]
-include = [
-  # Содержит схему и миграции
-  { path = "src/hh_applicant_tool/**/*.sql", format = ["sdist", "wheel"] },
-  # HTML/CSS/JS шаблоны UI
-  { path = "src/hh_applicant_tool/ui/templates/**/*", format = ["sdist", "wheel"] },
-]
+# include = [
+#   { path = "src/hh_applicant_tool/**/*.sql", format = ["sdist", "wheel"] },
+#   { path = "src/hh_applicant_tool/ui/templates/**/*", format = ["sdist", "wheel"] },
+# ]
 
 [tool.poetry.dependencies]
 brotli = "^1.2.0"
 cryptography = "^50.0.2"
 pillow = "^12.3.0"
-python = "^3.11"
+python = "^3.12"
 requests = { extras = ["socks"], version = "^2.32.3" }
 tomli-w = "^1.2.0"
 

@@ -28,7 +28,7 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
+#  Usually these files are written by a script from a template
 #  before PyInstaller builds the exe, so as to inject date/other information.
 *.manifest
 *.spec
@@ -91,3 +91,4 @@ out/
 jadx_out/
 *.har
 models/
+/Session.vim

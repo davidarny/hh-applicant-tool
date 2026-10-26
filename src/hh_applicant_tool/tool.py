@@ -11,8 +11,9 @@ import signal
 import smtplib
 import sys
 import time
+import types
 from collections.abc import Sequence
-from copy import deepcopy
+from contextlib import contextmanager
 from dataclasses import KW_ONLY, dataclass
 from functools import cached_property
 from http.cookiejar import MozillaCookieJar
@@ -32,6 +33,7 @@ from typing import (
     TypedDict,
 )
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
+from weakref import WeakValueDictionary
 
 import requests
 
@@ -44,9 +46,9 @@ from .constants import (
     ANDROID_CLIENT_ID,
     ANDROID_CLIENT_SECRET,
     ANDROID_WEBVIEW_USERAGENT,
-    CAPTCHA_MAX_SOLVE_DELAY,
-    CAPTCHA_MIN_SOLVE_DELAY,
     CAPTCHA_PROMPT,
+    CAPTCHA_SOLVE_MAX_DELAY,
+    CAPTCHA_SOLVE_MIN_DELAY,
     CAPTCHA_SUCCESS_BACKURL,
     CONFIG_DIR,
     CONFIG_FILENAME,
@@ -77,6 +79,21 @@ from .utils.system import has_gui_support, is_docker
 from .utils.term import print_kitty_image, print_sixel_image, setup_terminal
 from .utils.user_agent import generate_android_useragent
 
+_ACCEPT_IMAGE_HEADERS = types.MappingProxyType(
+    {
+        "Accept": "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5"
+    }
+)
+
+_CAPTCHA_HEADERS = types.MappingProxyType(
+    {
+        "X-Hhtmfrom": "",
+        "X-Hhtmsource": "account_captcha",
+    }
+)
+
+OPERATIONS = "operations"
+
 try:
     import tkinter as tk
     from tkinter import ttk
@@ -87,10 +104,6 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__.split(".")[0])
-
-OPERATIONS = "operations"
-
-_CAPTCHA_HEADERS = {"X-Hhtmfrom": "", "X-Hhtmsource": "account_captcha"}
 
 
 class XHRResult(TypedDict):
@@ -152,13 +165,6 @@ class BaseNamespace(argparse.Namespace):
 
 @dataclass
 class HHApplicantTool:
-    """Утилита для автоматизации действий соискателя на сайте hh.ru.
-
-    Исходники и предложения: <{repo_url}>
-
-    Группа поддержки: <{tg_url}>
-    """.format(repo_url=GITHUB_REPO_URL, tg_url=TELEGRAM_CHAT_URL)
-
     _: KW_ONLY
     api_delay: float | None = None
     base_url: str | None = None
@@ -278,7 +284,7 @@ class HHApplicantTool:
         parser.add_argument(
             "--handle-captcha",
             dest="captcha_handling",
-            help="Добавлять перехватчик ошибок капчи при вызове API",
+            help="Перехватывать ошибки капчи",
             action=argparse.BooleanOptionalAction,
             default=True,
         )
@@ -292,14 +298,15 @@ class HHApplicantTool:
         )
         subparsers = parser.add_subparsers(help="commands")
         package_dir = Path(__file__).resolve().parent / OPERATIONS
-        for _, module_name, _ in iter_modules([str(package_dir)]):
-            if module_name.startswith("_"):
+        for _, mod_name, _ in iter_modules([str(package_dir)]):
+            if mod_name.startswith("_"):
                 continue
-            mod = import_module(f"{__package__}.{OPERATIONS}.{module_name}")
+            mod = import_module(f"{__package__}.{OPERATIONS}.{mod_name}")
             op: BaseOperation = mod.Operation()
-            kebab_name = module_name.replace("_", "-")
+            # Кебаб Нурмагомедов
+            kebab = mod_name.replace("_", "-")
             op_parser = subparsers.add_parser(
-                kebab_name,
+                kebab,
                 aliases=getattr(op, "__aliases__", []),
                 description=op.__doc__,
                 formatter_class=ArgumentFormatter,
@@ -331,6 +338,8 @@ class HHApplicantTool:
 
     def _create_session(
         self,
+        label: str,
+        *,
         user_agent: str | None = None,
         proxies: dict[str, str] | None = None,
     ) -> requests.Session:
@@ -339,7 +348,7 @@ class HHApplicantTool:
             proxies = get_proxies_dict(self.proxy_url)
 
         if proxies:
-            logger.debug("Session proxies: %r", proxies)
+            logger.debug("%s session proxies: %r", label, proxies)
             session.proxies = proxies
 
         # В заголовки не лезь, если не понимаешь зачем они
@@ -351,13 +360,13 @@ class HHApplicantTool:
             }
         )
 
-        logger.debug("Session headers: %r", session.headers)
+        logger.debug("%s session headers: %r", label, session.headers)
 
         return session
 
     @cached_property
     def session(self) -> requests.Session:
-        session = self._create_session()
+        session = self._create_session("Desktop")
 
         if self.cookies_file.exists():
             jar = MozillaCookieJar(str(self.cookies_file))
@@ -413,31 +422,6 @@ class HHApplicantTool:
     def cookies_file(self) -> Path:
         return self.config_dir_path / COOKIES_FILENAME
 
-    # def get_section_config(self, section: str) -> dict:
-    #     keys = section.split(".")
-    #     current = self.config
-    #     parents = []
-    #
-    #     for key in keys:
-    #         if not isinstance(current, dict) or key not in current:
-    #             break
-    #
-    #         current = current[key]
-    #
-    #         if isinstance(current, dict):
-    #             parents.append(current)
-    #
-    #     if not parents:
-    #         return {}
-    #
-    #     result = deepcopy(parents[-1])
-    #
-    #     for parent in reversed(parents[:-1]):
-    #         for key, value in parent.items():
-    #             result.setdefault(key, deepcopy(value))
-    #
-    #     return result
-
     @cached_property
     def api_client(self) -> api.client.ApiClient:
         token = self.token_config.get("token") or {}
@@ -463,13 +447,38 @@ class HHApplicantTool:
 
         return client
 
-    def get_ai_client(
+    @cached_property
+    def _ai_clients(self) -> WeakValueDictionary[str, ai.OpenAIClient]:
+        return WeakValueDictionary()
+
+    def _get_ai_client(self, base_url: str) -> ai.OpenAIClient:
+        """Возвращает общий AI-клиент для указанного base_url."""
+        key = base_url.rstrip("/")
+        client = self._ai_clients.get(key)
+
+        if client is None:
+            client = ai.OpenAIClient(base_url)
+            logger.debug("client created: %r", client)
+            self._ai_clients[key] = client
+
+        return client
+
+    def ai_chat_for(
         self,
-        system_prompt: str | None = None,
-        **kwargs,
-    ) -> ai.OpenAIClient:
-        kwargs.setdefault("session", self.ai_session)
-        return ai.OpenAIClient(system_prompt=system_prompt, **kwargs)
+        section: str | None = None,
+        **defaults: Any,
+    ) -> ai.OpenAIChat:
+        """Создаёт AI-чат с настройками секции openai.<section>.
+
+        Клиент общий для всех чатов с одинаковым base_url. В клиент
+        передаётся только base_url, остальные настройки передаются чату.
+        Значения из конфига перекрывают defaults.
+        """
+        settings = {**defaults, **self.get_openai_config(section)}
+        base_url = settings.pop("base_url")
+        system_prompt = settings.pop("system_prompt")
+        client = self._get_ai_client(base_url)
+        return client.create_chat(system_prompt, **settings)
 
     def get_openai_config(self, section: str | None = None) -> dict:
         """Возвращает копию конфига openai с учетом наследования от главной"""
@@ -478,38 +487,23 @@ class HHApplicantTool:
         if section is None:
             section = default_section
         elif "." in section:
-            base, section = section.split(".")
+            base, section = section.split(".", 1)
             if base != base_section:
                 raise ValueError(
                     f"Base section must be {base_section!r}: got: {base!r}"
                 )
 
-        # if not re.fullmatch(r"[a-z]+", section):
-        #     raise ValueError(f"Bad {base_section!r} section name: {section!r}")
-
-        def required(name: str) -> None:
-            if name not in c:
-                raise ValueError(
-                    f"Значение {name!r} не задано в [{base_section}.{section}]"
-                    + (
-                        f" или [{base_section}.{default_section}]"
-                        if section != default_section
-                        else ""
-                    )
-                )
-
-        c = self.config.get(base_section) or {}
-        c = deepcopy(
-            {
-                **(c.get("default") or {}),
-                **(c.get(section) or {}),
-            }
+        # Поздние секции перекрывают ранние, результат — глубокая копия
+        c = self.config.get_merged(
+            f"{base_section}.{default_section}",
+            f"{base_section}.{section}",
         )
 
-        required("base_url")
-        # required("api_key")
-        # Для llama.cpp это поле не является обязательным
-        # required("model")
+        if "base_url" not in c:
+            where = f"[{base_section}.{section}]"
+            if section != default_section:
+                where += f" или [{base_section}.{default_section}]"
+            raise ValueError(f"Значение 'base_url' не задано в {where}")
 
         if self.openai_delay:
             c.setdefault("delay", self.openai_delay)
@@ -519,40 +513,6 @@ class HHApplicantTool:
             c.setdefault("connect_timeout", self.openai_connect_timeout)
 
         return c
-
-    def get_openai_settings(self, config_section: str = None) -> dict:
-        c = self.get_openai_config(section=config_section)
-        return {
-            k: v
-            for k, v in c.items()
-            if k
-            in [
-                "api_key",
-                "base_url",
-                "chat_completions_endpoint",
-                "connect_timeout",
-                "delay",
-                "history",
-                "max_completion_tokens",
-                "max_retries",
-                "model",
-                "proxy_url",
-                "system_prompt",
-                "temperature",
-                "timeout",
-            ]
-        }
-
-    def _get_captcha_ai(self) -> ai.OpenAIClient:
-        c = self.get_openai_settings("openai.captcha")
-        c.setdefault(
-            "system_prompt",
-            (
-                "You read CAPTCHA images. Return ONLY the text from the "
-                "image, exactly as it is written."
-            ),
-        )
-        return self.get_ai_client(**c)
 
     def get_me(self) -> api.datatypes.User:
         return self.api_client.get("/me")
@@ -755,7 +715,9 @@ class HHApplicantTool:
 
     @cached_property
     def webview_session(self) -> requests.Session:
-        return self._create_session(user_agent=ANDROID_WEBVIEW_USERAGENT)
+        return self._create_session(
+            "Android WebView", user_agent=ANDROID_WEBVIEW_USERAGENT
+        )
 
     def handle_captcha(
         self,
@@ -812,29 +774,14 @@ class HHApplicantTool:
         if not xsrf_token:
             raise ValueError("xsrf token отсутствует в Cookies!")
 
-        dt = -time.monotonic()
-
-        solution = self.solve_captcha(
-            captcha_state=state,
-            lang=lang,
-            referer_url=redirect_url,
-            xsrf_token=xsrf_token,
-            session=session,
-        )
-
-        dt += time.monotonic()
-
-        logger.debug("Время затраченное на решение капчи: %.2f сек", dt)
-
-        required_delay = random.uniform(
-            CAPTCHA_MIN_SOLVE_DELAY, CAPTCHA_MAX_SOLVE_DELAY
-        )
-
-        if (wait := required_delay - dt) > 0:
-            logger.info(
-                f"Ждем {wait:.2f} сек перед отправкой капчи на проверку",
+        with self.captcha_retry_delay():
+            solution = self.solve_captcha(
+                captcha_state=state,
+                lang=lang,
+                referer_url=redirect_url,
+                xsrf_token=xsrf_token,
+                session=session,
             )
-            time.sleep(wait)
 
         return self._send_captcha(
             text=solution.text,
@@ -858,12 +805,16 @@ class HHApplicantTool:
 
         Все значения уже определены и не None -- проверки делает вызывающий код.
         """
-        return {
+        default_headers = {
             "Accept": "application/json",
             "X-Requested-With": "XMLHttpRequest",
             "X-XSRFToken": xsrf,
             "Origin": origin,
             "Referer": referer_url,
+        }
+
+        return {
+            **default_headers,
             **extra_headers,
         }
 
@@ -916,20 +867,20 @@ class HHApplicantTool:
         data: dict | None = None,
         json: dict | None = None,
         referer_url: str | None = None,
-        headers: dict | None = None,
+        additional_headers: dict | None = None,
         xsrf_token: str | None = None,
         session: requests.Session | None = None,
     ) -> XHRResult:
         """Одна попытка XHR-запроса к внутреннему API hh.ru (без решения капчи).
 
-        endpoint     -- путь ("/shards/...") или полный URL (например, chatik.hh.ru).
-        params       -- query string (и для GET, и для POST/PUT).
-        data         -- тело запроса (form-data).
-        json         -- тело запроса (JSON).
-        referer_url  -- страница, с которой "сделан" запрос. Если не передан,
-                        берётся главная того же хоста.
-        headers      -- дополнительные заголовки; перекрывают стандартные.
-        xsrf_token   -- если не передан, берётся из куки _xsrf сессии.
+        endpoint            -- путь ("/shards/...") или полный URL (например, chatik.hh.ru).
+        params              -- query string (и для GET, и для POST/PUT).
+        data                -- тело запроса (form-data).
+        json                -- тело запроса (JSON).
+        referer_url         -- страница, с которой "сделан" запрос. Если не передан,
+                               берётся главная того же хоста.
+        additional_headers  -- дополнительные заголовки; перекрывают стандартные.
+        xsrf_token          -- если не передан, берётся из куки _xsrf сессии.
 
         Статус ответа НЕ проверяется: код возвращается в поле "http_status".
         Бросает CaptchaError, если сервер потребовал капчу, и ValueError,
@@ -949,7 +900,7 @@ class HHApplicantTool:
             origin=origin,
             xsrf=xsrf,
             referer_url=referer_url or f"{origin}/",
-            extra_headers=headers or {},
+            extra_headers=additional_headers or {},
         )
 
         r = session.request(
@@ -962,6 +913,10 @@ class HHApplicantTool:
             allow_redirects=False,
             timeout=(10, 30),
         )
+
+        logger.debug(
+            "XMLHttpRequest: %s %s %d", r.request.method, r.url, r.status_code
+        )
         return self._parse_xhr_response(r)
 
     def xhr_request(
@@ -972,7 +927,7 @@ class HHApplicantTool:
         data: dict | None = None,
         json: dict | None = None,
         referer_url: str | None = None,
-        headers: dict | None = None,
+        additional_headers: dict | None = None,
         xsrf_token: str | None = None,
         session: requests.Session | None = None,
     ) -> XHRResult:
@@ -990,11 +945,14 @@ class HHApplicantTool:
                     data=data,
                     json=json,
                     referer_url=referer_url,
-                    headers=headers,
+                    additional_headers=additional_headers,
                     xsrf_token=xsrf_token,
                     session=session,
                 )
             except CaptchaError as ex:
+                if not self.handle_captcha:
+                    raise
+
                 if attempt >= MAX_CAPTCHA_ATTEMPTS:
                     raise
 
@@ -1006,10 +964,11 @@ class HHApplicantTool:
                     endpoint,
                 )
 
-                solution = self.solve_captcha(
-                    captcha_state=ex.state,
-                    referer_url=referer_url,
-                )
+                with self.captcha_retry_delay():
+                    solution = self.solve_captcha(
+                        captcha_state=ex.state,
+                        referer_url=referer_url,
+                    )
                 json, data = self._with_captcha(
                     json,
                     data,
@@ -1021,6 +980,22 @@ class HHApplicantTool:
                 )
 
         raise AssertionError("unreachable")
+
+    @contextmanager
+    def captcha_retry_delay(self):
+        """Время задержки после решения капчи будет расти в прогрессии"""
+        start = time.monotonic()
+        try:
+            yield
+        finally:
+            elapsed = time.monotonic() - start
+            delay = random.uniform(
+                CAPTCHA_SOLVE_MIN_DELAY, CAPTCHA_SOLVE_MAX_DELAY
+            )
+            remaining = delay - elapsed
+            if remaining > 0:
+                logger.debug("Wait before retry after captcha: %.2f", remaining)
+                time.sleep(remaining)
 
     def get_captcha_image(
         self,
@@ -1043,7 +1018,7 @@ class HHApplicantTool:
             target_url,
             params={"lang": lang},
             referer_url=referer_url,
-            headers=_CAPTCHA_HEADERS,
+            additional_headers=_CAPTCHA_HEADERS,
             xsrf_token=xsrf_token,
             session=session,
         )
@@ -1056,9 +1031,7 @@ class HHApplicantTool:
 
         # Это не XHR: браузер грузит картинку из тега IMG с другим Accept
         # и без XHR-заголовков, поэтому здесь обычный session.get.
-        headers = {
-            "Accept": "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5"
-        }
+        headers = _ACCEPT_IMAGE_HEADERS.copy()
         if referer_url:
             headers |= {"Referer": referer_url}
 
@@ -1106,7 +1079,7 @@ class HHApplicantTool:
                 target_url,
                 params=payload,
                 referer_url=referer_url,
-                headers=_CAPTCHA_HEADERS,
+                additional_headers=_CAPTCHA_HEADERS,
                 xsrf_token=xsrf_token,
                 session=session,
             )
@@ -1195,8 +1168,14 @@ class HHApplicantTool:
             self.api_client.reset_tokens()
 
     @cached_property
-    def captcha_ai(self) -> ai.OpenAIClient:
-        return self._get_captcha_ai()
+    def captcha_ai(self) -> ai.OpenAIChat:
+        return self.ai_chat_for(
+            "openai.captcha",
+            system_prompt=(
+                "You read CAPTCHA images. Return ONLY the text from the "
+                "image, exactly as it is written."
+            ),
+        )
 
     @staticmethod
     def _format_experience(
@@ -1250,13 +1229,17 @@ class HHApplicantTool:
             i["name"] for i in (resume.get("work_format") or [])
         )
         rv["resume_citizenship"] = ", ".join(
-            i["name"] for i in resume.get("citizenship", [])
+            i["name"] for i in resume.get("citizenship") or []
         )
-        salary = resume.get("salary", {})
-        rv["resume_salary"] = (
-            f"{salary.get('amount', '')} {salary.get('currency', '').replace('RUR', 'руб.')}".strip()
+        salary = resume.get("salary") or {}
+        amount = salary.get("amount") or 0
+        currency = (
+            (salary.get("currency") or "")
+            .replace("RUR", "руб.")
+            .replace("USD", "$")
         )
-        education = resume.get("education", {})
+        rv["resume_salary"] = f"{amount} {currency}".strip()
+        education = resume.get("education") or {}
 
         try:
             primary_education = education["primary"][0]
@@ -1359,3 +1342,13 @@ class HHApplicantTool:
                 logger.error(f"Не удалось сохранить cookies: {ex}")
 
         return 1
+
+
+HHApplicantTool.__doc__ = """Утилита для автоматизации действий соискателя на сайте hh.ru.
+
+Исходники и предложения: <{repo_url}>
+
+Группа поддержки: <{tg_url}>""".format(
+    repo_url=GITHUB_REPO_URL,
+    tg_url=TELEGRAM_CHAT_URL,
+)

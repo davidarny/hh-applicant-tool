@@ -19,13 +19,16 @@ from hh_applicant_tool.operations.reply_chats import Operation
 NOW = datetime.now(timezone.utc)
 
 
-def _item(chat_id: int, *, mine: bool = False, age_days: float = 0, **extra) -> dict:
+def _item(chat_id: int, *, mine: bool = False, age_days: float = 1, **extra) -> dict:
+    """Чат с сообщением работодателя. С 2.5 на свежее сообщение человека
+    бот не отвечает 15 минут, поэтому по умолчанию сообщению сутки."""
     item = {
         "id": chat_id,
         "currentParticipantId": "me",
         "lastMessage": {
             "id": chat_id * 10,
             "participantId": "me" if mine else "hr",
+            "participantDisplay": {"name": "HR", "isBot": False},
             "text": "Когда сможете созвониться?",
             "creationTime": (NOW - timedelta(days=age_days)).isoformat(),
         },
@@ -52,6 +55,7 @@ def _collect(
     op.dry_run = False
     op.leave_discarded = leave_discarded
     op.bump = bump
+    op._viewed_messages = set()
     op.leave_chat = MagicMock()
     op.__dict__["chat_page_url"] = "https://chatik.hh.ru/"
     op.get_chats = MagicMock(

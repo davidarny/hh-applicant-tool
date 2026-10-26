@@ -1,8 +1,8 @@
 """Наследование параметров в конфиге [openai.*].
 
 С 2.1.0 общие параметры лежат в [openai.default], а секции вроде
-[openai.chat] их переопределяют. В OpenAIClient уходят только известные ему
-аргументы, и ключ API в их числе: без него клиента не создать.
+[openai.chat] их переопределяют. С 2.5 чат создаётся через ai_chat_for:
+значения из конфига перекрывают дефолты операции.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from pathlib import Path
 
 import tomli_w
 
-from hh_applicant_tool.ai.openai import OpenAIClient
 from hh_applicant_tool.tool import HHApplicantTool
 
 CONFIG = {
@@ -34,7 +33,7 @@ def _tool(tmp_path: Path) -> HHApplicantTool:
 
 
 def test_section_inherits_default_params(tmp_path: Path) -> None:
-    assert _tool(tmp_path).get_openai_settings("openai.captcha") == {
+    assert _tool(tmp_path).get_openai_config("openai.captcha") == {
         "api_key": "k",
         "base_url": "https://example.test/v1",
         "temperature": 0.3,
@@ -44,14 +43,17 @@ def test_section_inherits_default_params(tmp_path: Path) -> None:
 
 
 def test_section_overrides_default_params(tmp_path: Path) -> None:
-    settings = _tool(tmp_path).get_openai_settings("openai.chat")
+    settings = _tool(tmp_path).get_openai_config("openai.chat")
 
     assert settings["temperature"] == 0.5
 
 
-def test_settings_build_client(tmp_path: Path) -> None:
-    """В 2.1.0 ключ отфильтровывался, и OpenAIClient падал с TypeError."""
-    client = OpenAIClient(**_tool(tmp_path).get_openai_settings("openai.chat"))
+def test_config_overrides_operation_defaults(tmp_path: Path) -> None:
+    chat = _tool(tmp_path).ai_chat_for(
+        "openai.chat", system_prompt="default", temperature=0.0
+    )
 
-    assert client.api_key == "k"
-    assert client.model == "chat"
+    assert chat.api_key == "k"
+    assert chat.model == "chat"
+    assert chat.temperature == 0.5
+    assert chat.system_prompt == "default"

@@ -34,13 +34,12 @@ def _run(
 
     tool = MagicMock()
     tool.general_config = general or {}
-    tool.get_openai_settings.side_effect = lambda section: {
-        "api_key": "k",
-        "base_url": "https://example.test/v1",
-        "model": section,
-        **(sections or {}).get(section, {}),
-    }
-    tool.get_ai_client.side_effect = lambda **kw: OpenAIClient(**kw)
+    tool.ai_enabled = True
+    client = OpenAIClient("https://example.test/v1", api_key="k")
+    # Как tool.ai_chat_for: значения секции перекрывают дефолты операции
+    tool.ai_chat_for.side_effect = lambda section, **defaults: client.create_chat(
+        **{"model": section, **defaults, **(sections or {}).get(section, {})}
+    )
     op._apply_vacancies = MagicMock()  # type: ignore[method-assign]
 
     op.run(tool, args)
@@ -125,14 +124,14 @@ def test_filter_client_sends_system_prompt_in_openai_payload() -> None:
     response.status_code = 200
     response.json.return_value = {"choices": [{"message": {"content": "true"}}]}
     client = OpenAIClient(
+        "https://example.test/v1",
         api_key="test-key",
-        base_url="https://example.test/v1",
         model="test-model",
-        system_prompt="Only accept Python roles",
         session=session,
     )
+    chat = client.create_chat("Only accept Python roles")
 
-    assert client.complete("Вакансия: Python developer") == "true"
+    assert chat.complete("Вакансия: Python developer") == "true"
 
     # С 2.3 base_url без /chat/completions, путь клиент добавляет сам
     assert session.post.call_args.args[0] == (

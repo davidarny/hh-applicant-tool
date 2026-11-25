@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import base64
 import json
-import logging
 import random
 import re
 import time
@@ -13,14 +12,14 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
+from hh_applicant_tool.utils.log import logger
+
 from ..errors import OperationError, XHRError
 from ..tool import BaseOperation
 
 if TYPE_CHECKING:
     from ..tool import HHApplicantTool
 
-
-logger = logging.getLogger(__name__.split(".")[0])
 
 # Заголовки, специфичные для POS
 _LOGIN_HEADERS = {

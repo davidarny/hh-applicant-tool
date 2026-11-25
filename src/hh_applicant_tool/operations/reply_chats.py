@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import random
 import time
 import uuid
@@ -17,6 +16,7 @@ import requests
 
 from hh_applicant_tool.ai.openai import OpenAIChat, OpenAIError
 from hh_applicant_tool.api.errors import ApiError
+from hh_applicant_tool.utils.log import logger
 
 from ..constants import GITHUB_PROFILE_URL
 from ..errors import XHRError
@@ -141,9 +141,6 @@ STALE_AFTER_DAYS = 7
 # Не отвечаем, если оппонент написал менее N минут назад: даём возможность
 # вести диалог вручную
 OPPONENT_REPLY_COOLDOWN_MINUTES = 15
-
-
-logger = logging.getLogger(__name__.split(".")[0])
 
 
 # ------------------------------------------------------------ типы ответов
@@ -671,7 +668,7 @@ class Operation(BaseOperation):
     @cached_property
     def chat_url(self) -> str:
         r = self.tool.get_initial_state(
-            urljoin(self.tool.base_url, "/applicant/my_resumes")
+            urljoin(self.tool.hh_base_url, "/applicant/my_resumes")
         )
         return r["config"]["externalMicroFrontendHosts"]["chatik"]
 

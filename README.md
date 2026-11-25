@@ -1,20 +1,20 @@
 # HH Applicant Tool
 
 ![Publish to PyPI](https://github.com/s3rgeym/hh-applicant-tool/actions/workflows/publish.yml/badge.svg)
-[![PyPi Version](https://img.shields.io/pypi/v/hh-applicant-tool)](<>)
-[![Python Versions](https://img.shields.io/pypi/pyversions/hh-applicant-tool.svg)](<>)
-[![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/s3rgeym/hh-applicant-tool)](<>)
-[![PyPI - Downloads](https://img.shields.io/pypi/dm/hh-applicant-tool)](<>)
-[![Total Downloads](https://static.pepy.tech/badge/hh-applicant-tool)](<>)
+[![PyPi Version](https://img.shields.io/pypi/v/hh-applicant-tool)]()
+[![Python Versions](https://img.shields.io/pypi/pyversions/hh-applicant-tool.svg)]()
+[![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/s3rgeym/hh-applicant-tool)]()
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/hh-applicant-tool)]()
+[![Total Downloads](https://static.pepy.tech/badge/hh-applicant-tool)]()
 
 <div align="center">
-  <img height="20%" alt="hh-applicant-tool-logo" src="https://github.com/user-attachments/assets/009018f4-d4b1-4a93-a1c7-f4e5fc8bef45" />
+  <img width="580" height="138" alt="hh-applicant-tool-logo" src="https://github.com/user-attachments/assets/cc80888f-c594-48b1-89a3-1487085cd85c" />
+  <p>*The hh-applicant-tool logo, a white eight-toothed gear on a red rounded-square background, with a red circle outlined by a thin white ring at its center containing the two white capital letters “HH” set in the Noto Sans typeface, is not a registered trademark of hh.ru, either in Russia or anywhere else in the world. HeadHunter is known for its absurd demands that others stop using the letters “HH” and the word “Headhunter” in their names, while its own logo looks like the flag of Japan with two small letters “h” on it.</p>
 </div>
 
 [![Donate BTC](https://img.shields.io/badge/Donate-BTC-orange?style=for-the-badge&logo=bitcoin&logoColor=white)](bitcoin:BC1QWQXZX6D5Q0J5QVGH2VYXTFXX9Y6EPPGCW3REHS?label=%D0%94%D0%BB%D1%8F%20%D0%BF%D0%BE%D0%B6%D0%B5%D1%80%D1%82%D0%B2%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B9)
 
 **BTC Address:** `BC1QWQXZX6D5Q0J5QVGH2VYXTFXX9Y6EPPGCW3REHS` (спасибо за донаты — это единственное, что двигает разработку, так что не стесняйтесь и шлите их чаще).
-
 
 Скорее всего, вы перешли сюда из гугла по запросу `скрипт для рассылки откликов на hh`, и вы нашли не скрипт, а целый автономный программно-вычислительный комплекс для полной автоматизации действий на самом популярном раб_отном сайте России...
 
@@ -51,7 +51,7 @@
 > Её предназначение крутиться где-то в автозапуске, не отвлекая на себя
 > внимание. Написал раз конфиг, запустил и забыл.
 
-С появлением нейронок первыми решили автоматизировать самых бесполезных сотрудников в любой компании — овчаров, а тут ещё война, санкции, кризис, сокращения, и всё это легло на хроническую некомпетентность отечественных самозваных эксперт_ок, которые, судя по их профилям, еще консультанты с карьера, психологини, тарологини, нутрициологи... — в общем нихуя не имеют, нихуя не знают, и профильного, про которое они у всех спрашивают, У НИХ НЕТ (хоть оно многим и не нужно, но пахнет ЛИЦЕМЕРИЕМ)... В итоге поиск работы превратился в ад. В худшем случае нужно: 1) пройти тесты с 20-40 вопросами (у них любимым занятием в подростковом возрасте было решение тестов в журналах типа Лизы, отсюда "странная" любовь к этим ЕБУЧИМ ТЕСТАМ), 2) написать там целый рассказ о себе, 3) ответить на вопросы аналоговнетного хуИИ-рекрутёра в чате после отклика, после чего он подключит к чату «специалистку» по просмотрам резюме, 4) ответить на вопросы этой «царица во дворца» (чтобы потом в итоге вас все равно оценил ChatGPT). Всё это умеет автоматизировать данная утилита, если руки растут из нужного места чтобы ее настроить, а вот следующие 10 этапов с лайвкодингом и квадробингом, увы, нет...
+С появлением нейронок первыми решили автоматизировать самых бесполезных сотрудников в любой компании — овчаров, а тут ещё проблемы в экономике подъехали, и всё это легло на хроническую некомпетентность отечественных самозваных эксперт_ок, которые, судя по их профилям, еще консультанты с карьера, психологини, тарологини, нутрициологи... — в общем нихуя не имеют, нихуя не знают, и профильного, про которое они у всех спрашивают, У НИХ НЕТ (хоть оно многим и не нужно, но пахнет ЛИЦЕМЕРИЕМ)... В итоге поиск работы превратился в ад. В худшем случае нужно: 1) пройти тесты с 20-40 вопросами (у них любимым занятием в подростковом возрасте было решение тестов в журналах типа Лизы, отсюда "странная" любовь к этим ЕБУЧИМ ТЕСТАМ), 2) написать там целый рассказ о себе, 3) ответить на вопросы аналоговнетного хуИИ-рекрутёра в чате после отклика, после чего он подключит к чату «специалистку» по просмотрам резюме, 4) ответить на вопросы этой «царица во дворца» (чтобы потом в итоге вас все равно оценил ChatGPT). Всё это умеет автоматизировать данная утилита, если руки растут из нужного места чтобы ее настроить, а вот следующие 10 этапов с лайвкодингом и квадробингом, увы, нет...
 
 Функционал и особенности:
 
@@ -513,7 +513,10 @@ proxy_url = "http://user:pass@127.0.0.1:8080"
 base_url = "https://rabota.by"
 # FireFox
 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:157.0) Gecko/20100101 Firefox/157.0"
-captcha_lang = "RU"
+captcha_lang = "EN"
+
+# Юзер-агент, используемый приложением
+webview_user_agent = "..."
 
 # Ссылка на профиль GitHub, доступна как %(github_profile_url)s
 # (если не указать, берется GITHUB_PROFILE_URL из кода)
@@ -1104,8 +1107,8 @@ TypeError: ApiClient.__init__() got an unexpected keyword argument 'timeoutt'
 ## Капча
 
 <p align="center">
-<img width="628" height="167" alt="image" src="https://github.com/user-attachments/assets/c62d3ec2-deaa-4938-a59a-da8fb8add66d" />
-<br><em>Вывод капчи прямо в Konsole</em>
+<img width="704" height="280" alt="image" src="https://github.com/user-attachments/assets/0c808b46-247b-4e0b-93f8-6098c58bfdc6" />
+<br><em>Вывод капчи прямо в терминале через kitty-протокол</em>
 <br><br>
 <img width="380" height="282" alt="image" src="https://github.com/user-attachments/assets/725a341b-c59a-4083-9c1e-78ff3e8d1e91" />
 <br><em>Капча в винде</em>
@@ -1191,7 +1194,7 @@ services:
 Меня заинтересовала ваша вакансия %(vacancy_name)s. Прошу рассмотреть мою кандидатуру. С уважением, %(first_name)s %(last_name)s.
 ```
 
-Плейсхолдеры можно использовать в промптах кроме системных (в системных задаются какие-то общие установки типа пиши на русском). 
+Плейсхолдеры можно использовать в промптах кроме системных (в системных задаются какие-то общие установки типа пиши на русском).
 
 И эти плейсхолдеры не универсальны...
 
@@ -1598,6 +1601,7 @@ print(tool.api_client.get('/me'))
 - теперь утилита хуИИ-first. без оного невозможно отвечать в чатах, а вот рассылка откликов может работать и без него, но в сопроводительных будет однотипный текст, где только подставляются ваше имя и названия компании, вакансии...
 - настройки всех промптов вынесены в конфиг
 - конфиг сменил формат с json на toml, так как в последнем есть комментарии и строки типа таких:
+
   ```toml
   # Я комментарий
   setting_name = """
@@ -1606,6 +1610,7 @@ print(tool.api_client.get('/me'))
   Это все считается одной строкой...
   """
   ```
+
 - все промпты вынесены в конфиг, а флаги для их задания удалены. передавать километровые строки во флагах — это идиотская идея
 - токены вынесены из конфига, так как когда мы грузим конфиг, то комментариев в нем нет, и, следовательно, когда сохраняем, их там не будет, те сохранение токенов там затрет комменты, а они часто нужны
 - токены хранятся все так же в json, но теперь в `token.json`

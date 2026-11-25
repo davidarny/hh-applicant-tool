@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import os
 import shutil
 import subprocess
 import sys
 from typing import TYPE_CHECKING
 
+from hh_applicant_tool.utils.log import logger
+
 from ..tool import BaseNamespace, BaseOperation
 
 if TYPE_CHECKING:
     from ..tool import HHApplicantTool
-
-
-logger = logging.getLogger(__name__.split(".")[0])
 
 
 class Namespace(BaseNamespace):

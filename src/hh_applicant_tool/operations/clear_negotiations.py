@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import logging
 from typing import TYPE_CHECKING
+
+from hh_applicant_tool.utils.log import logger
 
 from ..api.errors import ApiError
 from ..tool import BaseNamespace, BaseOperation
@@ -11,8 +12,6 @@ from ..utils.date import parse_api_datetime
 
 if TYPE_CHECKING:
     from ..tool import HHApplicantTool
-
-logger = logging.getLogger(__name__.split(".")[0])
 
 
 class Namespace(BaseNamespace):
@@ -83,7 +82,7 @@ class Operation(BaseOperation):
             "/applicant/negotiations/trash",
             payload,
             additional_headers=headers,
-            referer_url=f"{self.tool.base_url}/applicant/negotiations?hhtmFrom=main&hhtmFromLabel=header",
+            referer_url=f"{self.tool.hh_base_url}/applicant/negotiations?hhtmFrom=main&hhtmFromLabel=header",
         )
 
         logger.debug(r)

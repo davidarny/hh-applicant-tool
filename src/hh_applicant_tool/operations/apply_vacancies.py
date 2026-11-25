@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import html
-import logging
 import random
 import re
 from email.message import EmailMessage
@@ -15,6 +14,8 @@ from urllib.parse import (
 )
 
 import requests
+
+from hh_applicant_tool.utils.log import logger
 
 from ..ai.base import AIError
 from ..ai.openai import OpenAIChat
@@ -52,8 +53,6 @@ class _ApplyState:
 class _ApplyError(Exception):
     """Отклик на вакансию не отправлен. Вакансия пропускается."""
 
-
-logger = logging.getLogger(__name__.split(".")[0])
 
 # Параметры поиска вакансий, задаваемые флагами
 SEARCH_PARAM_NAMES = (
@@ -1113,7 +1112,7 @@ class Operation(BaseOperation):
         Возвращает payload для отправки и URL страницы отклика (referer).
         """
         placeholders = placeholders or {}
-        response_url = f"{self.tool.base_url}/applicant/vacancy_response?vacancyId={vacancy_id}&startedWithQuestion=false&hhtmFrom=vacancy"
+        response_url = f"{self.tool.hh_base_url}/applicant/vacancy_response?vacancyId={vacancy_id}&startedWithQuestion=false&hhtmFrom=vacancy"
 
         if not (tests_data := self._get_vacancy_tests(response_url)):
             raise ValueError(f"Данные тестов не найдены на {response_url}.")
@@ -1171,17 +1170,19 @@ class Operation(BaseOperation):
                         answer, [str(s["id"]) for s in solutions]
                     )
                 else:
-                    yes_solution = choose_similar(
-                        "да", [s["text"] for s in solutions]
-                    )
+                    texts = [strip_tags(s["text"]) for s in solutions]
+                    best = choose_similar("да", texts)
 
-                    payload[field_name] = (
-                        yes_solution["id"]
-                        if yes_solution
+                    # choose_similar возвращает строку (текст варианта) или None.
+                    # Находим соответствующее решение по индексу.
+                    if best is not None and best in texts:
+                        chosen = solutions[texts.index(best)]
+                    else:
                         # По статистике правильный ответ в большинстве случаев
                         # находится посередине
-                        else solutions[len(solutions) // 2]["id"]
-                    )
+                        chosen = solutions[len(solutions) // 2]
+
+                    payload[field_name] = chosen["id"]
             else:
                 # Рандомные эмоджи
                 # payload[f"{field_name}_text"] = "".join(
@@ -1226,7 +1227,7 @@ class Operation(BaseOperation):
                 "X-Hhtmfrom": "vacancy",
                 "X-Hhtmsource": "vacancy_response",
             },
-        )
+        )  # ty: ignore[invalid-return-type]
 
     def _parse_site(self, url: str) -> dict[str, Any]:
         with self.tool.session.get(

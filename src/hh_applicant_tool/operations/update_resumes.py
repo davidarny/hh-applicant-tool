@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import argparse
-import logging
 from typing import TYPE_CHECKING
+
+from hh_applicant_tool.utils.log import logger
 
 from ..api import ApiError, datatypes
 from ..tool import BaseNamespace, BaseOperation
@@ -11,8 +12,6 @@ from ..utils.string import shorten
 
 if TYPE_CHECKING:
     from ..tool import HHApplicantTool
-
-logger = logging.getLogger(__name__.split(".")[0])
 
 
 class Namespace(BaseNamespace):

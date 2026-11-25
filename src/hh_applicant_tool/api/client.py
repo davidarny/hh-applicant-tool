@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-import logging
 import time
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -10,6 +9,8 @@ from typing import Any, Callable, Literal, TypeVar
 from urllib.parse import urlencode, urljoin
 
 import requests
+
+from hh_applicant_tool.utils.log import logger
 
 from ..utils.helpers import get_proxies_dict
 from . import errors
@@ -41,8 +42,6 @@ AllowedMethods = Literal[
 ]
 
 T = TypeVar("T")
-
-logger = logging.getLogger(__name__.split(".")[0])
 
 
 # Thread-safe
